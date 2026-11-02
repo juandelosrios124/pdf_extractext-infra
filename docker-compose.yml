@@ -1,0 +1,47 @@
+# Consul: servidor unico con UI para service discovery de extract y documents.
+# La red es externa y compartida por los tres repos; se crea una sola vez:
+#
+#   docker network create mired
+#   cp .env.example .env   # y completar CONSUL_HTTP_TOKEN
+#   docker compose up -d
+
+services:
+  consul:
+    image: hashicorp/consul:2.0.4
+    # El entrypoint de la imagen agrega -data-dir y -config-dir; el resto de la
+    # configuracion esta en consul/consul.json.
+    command: agent
+    environment:
+      # El token de ACL no se versiona: el entrypoint escribe esta variable en
+      # /consul/config/local.json y Consul la mezcla con consul.json.
+      CONSUL_LOCAL_CONFIG: '{"acl":{"tokens":{"initial_management":"${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}"}}}'
+      # Lo usa la CLI de consul dentro del contenedor (docker compose exec).
+      CONSUL_HTTP_TOKEN: ${CONSUL_HTTP_TOKEN}
+    volumes:
+      - consul_data:/consul/data
+      # Se monta solo el archivo: el entrypoint hace chown del directorio de
+      # configuracion y escribe ahi local.json.
+      - ./consul/consul.json:/consul/config/consul.json:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # UI y API solo desde esta maquina. Los contenedores de mired usan
+      # http://consul:8500 sin pasar por el host.
+      - "127.0.0.1:${CONSUL_UI_PORT:-8500}:8500"
+    networks:
+      - mired
+    healthcheck:
+      # Healthy recien cuando hay lider elegido, no solo el proceso vivo.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8500/v1/status/leader | grep -q ':8300'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  consul_data:
+
+networks:
+  mired:
+    name: ${SHARED_NETWORK:-mired}
+    external: true

@@ -1,13 +1,19 @@
 # Configuracion dinamica de Traefik (provider file, recargada en caliente).
 # Solo va aca lo que no se puede declarar con tags de Consul. Routers,
 # services y middlewares los declara cada servicio en su registro.
+#
+# Los valores salen del "Presupuesto de timeouts" del README: cualquier cambio
+# se hace primero en esa tabla.
 
 http:
   serversTransports:
     # Lo referencia extract-service con el tag:
     #   traefik.http.services.extract.loadbalancer.serverstransport=extract-transport@file
-    # 60s es el mismo valor que tenia Caddy; el definitivo se fija en la issue
-    # del presupuesto de timeouts (#5).
     extract-transport:
       forwardingTimeouts:
-        responseHeaderTimeout: 60s
+        # Conexion TCP a la replica. Si no conecta en 2 s, 504.
+        dialTimeout: 2s
+        # Espera de los headers de respuesta, contada desde que se termino de
+        # enviar el request (body incluido) a la replica. Corta antes que
+        # documents (EXTRACT_TIMEOUT=27s) y despues de extract (23 s): 504.
+        responseHeaderTimeout: 25s

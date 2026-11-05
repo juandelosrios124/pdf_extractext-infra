@@ -1,4 +1,5 @@
 # Consul: servidor unico con UI para service discovery de extract y documents.
+# Traefik: gateway del sistema; lee servicios y ruteo desde los tags de Consul.
 # La red es externa y compartida por los tres repos; se crea una sola vez:
 #
 #   docker network create mired
@@ -36,6 +37,74 @@ services:
       timeout: 3s
       retries: 5
       start_period: 15s
+    restart: unless-stopped
+
+  # Traefik: gateway del sistema. Descubre los servicios en el catalogo de
+  # Consul y arma routers/services/middlewares a partir de los tags del
+  # registro (no de labels de Docker: no hay provider docker ni docker.sock).
+  traefik:
+    image: traefik:v3.7.17
+    # Configuracion estatica solo por flags: Traefik acepta una unica fuente
+    # (archivo, CLI o entorno, mutuamente excluyentes) y por CLI Compose puede
+    # interpolar CONSUL_HTTP_TOKEN desde .env. La dinamica va en
+    # traefik/dynamic.yml (provider file).
+    command:
+      # Entrypoints: "web" para el trafico; "traefik" interno para dashboard,
+      # API, ping y metricas.
+      - --entrypoints.web.address=:80
+      - --entrypoints.traefik.address=:8080
+      # Dashboard y API en el entrypoint "traefik" sin router propio. Es
+      # aceptable porque ese puerto solo se publica en 127.0.0.1.
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --ping=true
+      - --ping.entrypoint=traefik
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entrypoint=traefik
+      # Provider Consul Catalog: solo servicios con traefik.enable=true y solo
+      # instancias con todos los checks en passing (el default admite warning).
+      - --providers.consulcatalog=true
+      - --providers.consulcatalog.endpoint.address=consul:8500
+      - --providers.consulcatalog.endpoint.token=${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}
+      - --providers.consulcatalog.exposedbydefault=false
+      # Sin watch Traefik consulta el catalogo cada 15 s (refreshInterval).
+      - --providers.consulcatalog.watch=true
+      - --providers.consulcatalog.strictchecks=passing
+      # Provider file: lo que no se puede declarar con tags (serversTransport).
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      # Access log JSON a stdout; de los headers solo se conserva X-Request-ID.
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.headers.defaultmode=drop
+      - --accesslog.fields.headers.names.X-Request-ID=keep
+      - --log.level=INFO
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+    volumes:
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    ports:
+      # Trafico de entrada, solo desde esta maquina.
+      - "127.0.0.1:${TRAEFIK_PORT:-8080}:80"
+      # Dashboard (/dashboard/), API (/api), /ping y /metrics.
+      - "127.0.0.1:${TRAEFIK_DASHBOARD_PORT:-8081}:8080"
+    networks:
+      - mired
+    depends_on:
+      consul:
+        condition: service_healthy
+    healthcheck:
+      # Subcomando de la imagen: consulta /ping del entrypoint "traefik" (:8080).
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${TRAEFIK_CPUS:-0.5}"
+          memory: ${TRAEFIK_MEMORY:-256M}
     restart: unless-stopped
 
 volumes:

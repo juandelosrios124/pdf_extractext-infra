@@ -1,0 +1,13 @@
+# Configuracion dinamica de Traefik (provider file, recargada en caliente).
+# Solo va aca lo que no se puede declarar con tags de Consul. Routers,
+# services y middlewares los declara cada servicio en su registro.
+
+http:
+  serversTransports:
+    # Lo referencia extract-service con el tag:
+    #   traefik.http.services.extract.loadbalancer.serverstransport=extract-transport@file
+    # 60s es el mismo valor que tenia Caddy; el definitivo se fija en la issue
+    # del presupuesto de timeouts (#5).
+    extract-transport:
+      forwardingTimeouts:
+        responseHeaderTimeout: 60s

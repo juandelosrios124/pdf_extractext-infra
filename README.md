@@ -1,5 +1,7 @@
 # pdf_extractext-infra
 
+[![CI](https://github.com/juandelosrios124/pdf_extractext-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/juandelosrios124/pdf_extractext-infra/actions/workflows/ci.yml)
+
 Infraestructura compartida de los microservicios de pdf_extractext:
 la red Docker `mired`, Consul (service discovery y health checks) y Traefik
 (gateway del sistema).
@@ -130,6 +132,26 @@ Logs de acceso (JSON, uno por pedido, con `X-Request-ID`):
 ```bash
 docker compose logs -f traefik
 ```
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada push a `main` y
+en cada pull request. Los jobs que necesitan `.env` lo generan desde `.env.example`
+con un token de prueba (`uuidgen`); el `.env` real nunca se usa.
+
+- **`lint`**: `actionlint` sobre el workflow, `shellcheck` sobre `scripts/*.sh`, y que
+  `traefik/dynamic.yml` (`yamllint -d relaxed`) y `consul/consul.json` (`jq`) parseen.
+- **`compose`**: `docker compose config --quiet` resuelve sin errores y `.env` no está versionado.
+- **`consul-config`**: `consul validate` de `consul/consul.json` con la misma imagen
+  del compose (la toma de `docker compose config`).
+- **`smoke`** (después de `lint` y `compose`): `docker compose up -d --wait`, Consul con
+  líder, Traefik responde `/ping` con los providers ConsulCatalog y File, y
+  `scripts/smoke-traefik.sh` pasa. Si falla, muestra `docker compose logs`; siempre
+  termina con `docker compose down -v`.
+
+Las imágenes de Consul y Traefik están fijadas por tag **y digest** en el compose.
+Para actualizar una versión, cambiar el tag y obtener el digest nuevo con
+`docker buildx imagetools inspect <imagen>:<tag>` (campo `Digest`).
 
 ## Variables compartidas
 

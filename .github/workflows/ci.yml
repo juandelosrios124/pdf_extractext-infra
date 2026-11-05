@@ -128,6 +128,11 @@ jobs:
       - name: smoke-traefik.sh
         run: scripts/smoke-traefik.sh
 
+      - name: smoke-timeouts.sh
+        # Presupuesto de timeouts (README): 200 a 20 s, 504 a ~25 s y 504 con
+        # subida lenta sin que lo corte writeTimeout. Tarda ~1,5 min.
+        run: scripts/smoke-timeouts.sh
+
       - name: Logs (si algo fallo)
         if: failure()
         run: |

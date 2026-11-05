@@ -1,0 +1,139 @@
+# CI de la infraestructura compartida (Consul + Traefik).
+# Cada paso usa los mismos comandos que se corren a mano (ver README, "CI").
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Con shell explicito Actions usa "bash -eo pipefail".
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+      - name: shellcheck
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 scripts/*.sh
+
+      - name: traefik/dynamic.yml parsea
+        run: pipx run yamllint==1.38.0 -d relaxed traefik/dynamic.yml
+
+      - name: consul/consul.json parsea
+        run: jq empty consul/consul.json
+
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: .env no esta versionado
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error file=.env::.env esta versionado; sacarlo con git rm --cached .env"
+            exit 1
+          fi
+
+      - name: Generar .env de prueba
+        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
+        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        run: |
+          token=$(uuidgen)
+          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+
+      - name: docker compose config
+        run: docker compose config --quiet
+
+  consul-config:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Generar .env de prueba
+        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
+        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        run: |
+          token=$(uuidgen)
+          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+
+      - name: consul validate (misma imagen que el compose)
+        # data_dir no esta en consul.json: en el compose lo pasa el entrypoint
+        # como flag al arrancar el agent. Aca se agrega por CONSUL_LOCAL_CONFIG
+        # (el entrypoint lo escribe en /consul/config/local.json) y se valida
+        # el directorio entero, como lo carga el agente.
+        run: |
+          image=$(docker compose config --format json | jq -er '.services.consul.image')
+          echo "imagen: $image"
+          docker run --rm -e CONSUL_LOCAL_CONFIG='{"data_dir":"/consul/data"}' \
+            -v "$PWD/consul/consul.json:/consul/config/consul.json:ro" \
+            "$image" consul validate /consul/config
+
+  smoke:
+    needs: [lint, compose]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Generar .env de prueba
+        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
+        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        run: |
+          token=$(uuidgen)
+          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+
+      - name: Levantar consul y traefik
+        run: |
+          docker network create mired
+          docker compose up -d --wait --wait-timeout 120
+          docker compose ps
+
+      - name: Consul tiene lider
+        run: |
+          leader=$(curl -s 127.0.0.1:8500/v1/status/leader)
+          echo "lider: $leader"
+          [[ $leader == *:8300* ]]
+
+      - name: Traefik /ping
+        run: |
+          ping=$(curl -s 127.0.0.1:8081/ping)
+          echo "ping: $ping"
+          [[ $ping == OK ]]
+
+      - name: Traefik providers (ConsulCatalog y File)
+        run: |
+          curl -s 127.0.0.1:8081/api/overview | jq -c .providers \
+            | tee /dev/stderr \
+            | jq -e 'index("ConsulCatalog") != null and index("File") != null'
+
+      - name: smoke-traefik.sh
+        run: scripts/smoke-traefik.sh
+
+      - name: Logs (si algo fallo)
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color
+
+      - name: docker compose down -v
+        if: always()
+        run: docker compose down -v

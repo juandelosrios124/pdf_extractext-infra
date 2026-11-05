@@ -52,6 +52,14 @@ services:
       # Entrypoints: "web" para el trafico; "traefik" interno para dashboard,
       # API, ping y metricas.
       - --entrypoints.web.address=:80
+      # Timeouts del lado del cliente en "web" (ver "Presupuesto de timeouts"
+      # en el README). readTimeout: lectura del request completo, body
+      # incluido. writeTimeout: desde que se leyeron los headers hasta terminar
+      # de escribir la respuesta (incluye la subida del body y la espera a
+      # extract), por eso es mayor que readTimeout + responseHeaderTimeout.
+      - --entrypoints.web.transport.respondingtimeouts.readtimeout=${TRAEFIK_READ_TIMEOUT:-30s}
+      - --entrypoints.web.transport.respondingtimeouts.writetimeout=${TRAEFIK_WRITE_TIMEOUT:-60s}
+      - --entrypoints.web.transport.respondingtimeouts.idletimeout=${TRAEFIK_IDLE_TIMEOUT:-90s}
       - --entrypoints.traefik.address=:8080
       # Dashboard y API en el entrypoint "traefik" sin router propio. Es
       # aceptable porque ese puerto solo se publica en 127.0.0.1.

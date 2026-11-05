@@ -8,7 +8,7 @@
 
 services:
   consul:
-    image: hashicorp/consul:2.0.4
+    image: hashicorp/consul:2.0.4@sha256:1c59f007df8ea1c21b2558dc73ef8d99047bc895d9e52e635d1e745e35fe9a54
     # El entrypoint de la imagen agrega -data-dir y -config-dir; el resto de la
     # configuracion esta en consul/consul.json.
     command: agent
@@ -43,7 +43,7 @@ services:
   # Consul y arma routers/services/middlewares a partir de los tags del
   # registro (no de labels de Docker: no hay provider docker ni docker.sock).
   traefik:
-    image: traefik:v3.7.17
+    image: traefik:v3.7.17@sha256:68ae5fe5b64ca166704b746a9e8afcd385e36b3f569a5691401bf652d57b3748
     # Configuracion estatica solo por flags: Traefik acepta una unica fuente
     # (archivo, CLI o entorno, mutuamente excluyentes) y por CLI Compose puede
     # interpolar CONSUL_HTTP_TOKEN desde .env. La dinamica va en

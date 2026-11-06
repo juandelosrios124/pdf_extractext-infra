@@ -21,6 +21,8 @@
 # Variables (si falta alguna se leen de ENV_FILE, por defecto .env en la raiz
 # del repo): CONSUL_HTTP_TOKEN, CONSUL_AGENT_TOKEN, CONSUL_TRAEFIK_TOKEN,
 # CONSUL_EXTRACT_TOKEN, CONSUL_DOCUMENTS_TOKEN, CONSUL_UI_PORT.
+# SINCE: desde cuando se revisa el log de Consul (formato de
+# "docker logs --since"); por defecto, el fin de consul-acl-init.
 # Nunca imprime los tokens: viajan en el header por un descriptor (-H @fd),
 # no en la linea de comandos.
 
@@ -137,15 +139,21 @@ init_id=$("${COMPOSE[@]}" ps -aq consul-acl-init)
 [[ -n $init_id ]] || { log "FALLO no hay contenedor de consul-acl-init"; exit 1; }
 init_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$init_id")
 check "consul-acl-init" "exited 0" "$init_state"
-since=$(docker inspect -f '{{.State.FinishedAt}}' "$init_id")
-# Errores del propio agente (anti-entropy, coordenadas, nodo). Se excluye
-# agent.http: son pedidos de clientes rechazados, como los 403 de este script.
+since="${SINCE:-$(docker inspect -f '{{.State.FinishedAt}}' "$init_id")}"
+# Errores del propio agente: anti-entropy del nodo (token del agente) y de los
+# servicios registrados en el agente (token con que se registro cada uno). Se
+# excluye agent.http: son pedidos de clientes rechazados, como los 403 de este
+# script.
 agent_errors=$("${COMPOSE[@]}" logs --no-color --no-log-prefix --since "$since" consul 2>&1 \
   | grep -E '\[(ERROR|WARN) *\]' \
   | grep -v 'agent\.http:' \
   | grep -Ei 'acl|permission denied|blocked' || true)
 if [[ -n $agent_errors ]]; then
   printf '%s\n' "$agent_errors" | sed 's/^/    /'
+  if grep -q 'Service registration blocked' <<<"$agent_errors"; then
+    log "pista: hay replicas registradas sin un token valido (por ejemplo, de antes"
+    log "de deny). Recrearlas con su token (docker compose up -d --wait en su repo)."
+  fi
 fi
 check "errores de ACL del agente desde $since" 0 "$(grep -c . <<<"$agent_errors" || true)"
 

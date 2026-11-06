@@ -115,6 +115,28 @@ El nombre de la variable en extract y documents no cambia; cambia el valor. Desp
 de cambiarlo, recrear los contenedores (`docker compose up -d --wait` en cada repo).
 Cada réplica se desregistra con el token viejo al apagarse y se registra con el nuevo.
 
+### Migración desde `allow`
+
+Una réplica registrada con `allow` y **sin token** no puede desregistrarse cuando
+Consul ya está en `deny`: al apagarse recibe `403`. Su entrada queda en el
+catálogo congelada en `passing` y el agente loguea `agent: Service registration
+blocked by ACLs ... accessorID="anonymous token"`. Traefik puede seguir mandándole
+tráfico a una IP que ya no es de esa réplica. Orden para pasar a `deny`:
+
+1. `docker compose down` en extract-service y documents-service (todavía con
+   `allow`, se desregistran bien).
+2. Agregar los tokens al `.env` de infra y `docker compose up -d --wait`.
+3. Poner el token de cada servicio en su `.env` y `docker compose up -d --wait` en cada repo.
+
+Si ya quedaron entradas fantasma, desregistrarlas con el token de management. Son los
+ID registrados que no son el hostname de ningún contenedor vivo:
+
+```bash
+docker compose exec consul sh -c 'curl -s -H "X-Consul-Token: $CONSUL_HTTP_TOKEN" 127.0.0.1:8500/v1/agent/services' | jq -r '.[].ID'
+docker ps -q | xargs docker inspect -f '{{.Config.Hostname}}'
+docker compose exec consul consul services deregister -id <ID>
+```
+
 ### UI y API con token
 
 - **UI:** <http://127.0.0.1:8500/ui> → *Log in* → pegar un token. Para administrar,
@@ -155,7 +177,10 @@ Contra el Consul levantado comprueba:
 5. sin token `/v1/catalog/services` devuelve `200 {}` (Consul 2.0.4 filtra, no rechaza);
 6. el token del agente tiene la policy `agent`, el nodo `ds` tiene sus direcciones en el
    catálogo y, desde que terminó `consul-acl-init`, el log de Consul no tiene errores de
-   ACL del agente (por ejemplo `agent: Coordinate update blocked by ACLs`).
+   ACL del agente (por ejemplo `agent: Coordinate update blocked by ACLs`, o
+   `Service registration blocked by ACLs` si quedaron réplicas registradas sin token:
+   ver [Migración desde `allow`](#migración-desde-allow)). `SINCE=<fecha>` cambia el
+   inicio de esa ventana.
 
 Toma los tokens del entorno o del `.env` y nunca los imprime. Los servicios de prueba
 no tienen tags de Traefik, así que no reciben tráfico aunque extract y documents estén

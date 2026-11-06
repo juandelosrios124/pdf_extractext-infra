@@ -22,7 +22,7 @@ v2, GNU Make, `curl` y `jq`.
 
 ```bash
 make up      # check → red → infra → extract → documents → espera las rutas de Traefik
-make smoke   # POST /documents por Traefik (201 o 200 duplicate) y smoke-traefik.sh
+make smoke   # POST /extract y POST /documents por Traefik (201 o 200 duplicate), y smoke-traefik.sh
 make ps      # estado de los tres stacks
 make down    # documents → extract → infra; conserva volúmenes y red
 ```
@@ -40,7 +40,7 @@ Funciona igual desde fish o cualquier otro shell: el Makefile fija `SHELL := bas
 | `down` | `docker compose down` en documents, extract e infra, en ese orden. **Sin `-v`** (conserva `consul_data` y la base de Mongo) y sin borrar la red. |
 | `ps` | `docker compose ps -a` de los tres stacks, con un título por stack. |
 | `logs` | `logs -f` de un stack: `make logs S=infra`, `S=extract` o `S=documents` (default). `TAIL` líneas previas. |
-| `smoke` | `wait-routes`, `POST /documents` por Traefik con un PDF de prueba de extract ([`scripts/smoke-documents.sh`](scripts/smoke-documents.sh)) y [`scripts/smoke-traefik.sh`](scripts/smoke-traefik.sh). |
+| `smoke` | `wait-routes`; con un PDF de prueba de extract, `POST /extract` por Traefik (`200`, no guarda nada) y `POST /documents` por Traefik (`201`, o `200` con `"duplicate": true` si ya estaba) ([`scripts/smoke-documents.sh`](scripts/smoke-documents.sh)); y [`scripts/smoke-traefik.sh`](scripts/smoke-traefik.sh). El `POST /extract` hace falta porque un duplicado no llama a extract. |
 
 **Por qué `wait-routes`.** `docker compose up --wait` espera el healthcheck de Docker,
 no el check de Consul: una réplica entra en la rotación de Traefik unos segundos

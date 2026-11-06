@@ -141,8 +141,8 @@ logs: ## Sigue los logs de un stack: S=infra|extract|documents (default document
 	echo "==> logs -f de $(S) (Ctrl+C para salir)"; \
 	$(call compose,$$dir) logs -f --tail="$(TAIL)"
 
-smoke: wait-routes ## POST /documents por Traefik con un PDF de prueba y scripts/smoke-traefik.sh
-	@echo "==> smoke: POST /documents por Traefik"
+smoke: wait-routes ## POST /extract y POST /documents por Traefik con un PDF de prueba, y smoke-traefik.sh
+	@echo "==> smoke: POST /extract y POST /documents por Traefik"
 	@TRAEFIK_URL="$(TRAEFIK_URL)" "$(INFRA_DIR)/scripts/smoke-documents.sh" "$(SMOKE_PDF)"
 	@echo "==> smoke: scripts/smoke-traefik.sh"
 	@$(CLEAN_ENV) "$(INFRA_DIR)/scripts/smoke-traefik.sh"

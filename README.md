@@ -22,6 +22,7 @@ v2, GNU Make, `curl` y `jq`.
 
 ```bash
 make up      # check → red → infra → extract → documents → espera las rutas de Traefik
+make up RELEASE=1 EXTRACT_IMAGE_TAG=sha-xxxxxxx DOCUMENTS_IMAGE_TAG=sha-yyyyyyy  # imágenes de GHCR, sin compilar
 make smoke   # POST /extract y POST /documents por Traefik (201 o 200 duplicate), y smoke-traefik.sh
 make ps      # estado de los tres stacks
 make down    # documents → extract → infra; conserva volúmenes y red
@@ -35,8 +36,10 @@ Funciona igual desde fish o cualquier otro shell: el Makefile fija `SHELL := bas
 | `help` | Lista los targets y las variables con su valor actual. Es el default. |
 | `check` | Precondiciones: existen las carpetas de los repos y su `.env`, los tokens no están vacíos, el `CONSUL_HTTP_TOKEN` de extract y de documents es el `CONSUL_EXTRACT_TOKEN` y el `CONSUL_DOCUMENTS_TOKEN` de infra, `CONSUL_ENABLED` no está apagado, el `EXTRACT_URL` de documents no apunta a `localhost`, y Docker responde. Junta todos los errores y cada uno dice qué hacer. **Nunca muestra tokens.** ([`scripts/check.sh`](scripts/check.sh)) |
 | `network` | Crea la red `SHARED_NETWORK` si no existe. Si ya está, no hace nada. |
-| `up` | `check` → `network` → infra `up -d --wait` → extract `up -d --build --wait` → documents `up -d --build --wait` → `wait-routes`. |
+| `up` | `check` → `network` → infra `up -d --wait` → extract `up -d --build --wait` → documents `up -d --build --wait` → `wait-routes`. Con `RELEASE=1`, extract y documents van con `-f <repo>/docker-compose.yml up -d --pull=missing --wait` y al final corre `images` (ver [Modo release](#modo-release-imágenes-de-ghcr)). |
+| `pull` | Solo con `RELEASE=1`: baja de GHCR las imágenes de extract y documents sin levantar nada. Sirve para refrescar `latest`. |
 | `wait-routes` | Espera hasta `ROUTES_TIMEOUT` s a que la API de Traefik muestre los routers `extract@consulcatalog` y `documents@consulcatalog` con servidores. ([`scripts/wait-routes.sh`](scripts/wait-routes.sh)) |
+| `images` | Para extract y documents corriendo: imagen configurada, digest del registry (`RepoDigests`) y label `org.opencontainers.image.revision`, una línea por imagen distinta (no por réplica). En desarrollo dice `build local, sin digest`. ([`scripts/images.sh`](scripts/images.sh)) |
 | `down` | `docker compose down` en documents, extract e infra, en ese orden. **Sin `-v`** (conserva `consul_data` y la base de Mongo) y sin borrar la red. |
 | `ps` | `docker compose ps -a` de los tres stacks, con un título por stack. |
 | `logs` | `logs -f` de un stack: `make logs S=infra`, `S=extract` o `S=documents` (default). `TAIL` líneas previas. |
@@ -68,8 +71,12 @@ Se pasan en la línea de comandos (`make up EXTRACT_DIR=/otra/ruta`).
 | `TRAEFIK_URL` | `http://127.0.0.1:8080` | Tráfico de Traefik (`TRAEFIK_PORT`), para `smoke`. |
 | `TRAEFIK_API` | `http://127.0.0.1:8081` | API de Traefik (`TRAEFIK_DASHBOARD_PORT`), para `wait-routes`. |
 | `INFRA_UP_FLAGS` | `-d --wait` | Flags de `docker compose up` de infra. |
-| `EXTRACT_UP_FLAGS` | `-d --build --wait` | Ídem extract. Cuando las imágenes vengan de un registry, `--build` pasa a `--pull=missing` sin tocar los targets. |
-| `DOCUMENTS_UP_FLAGS` | `-d --build --wait` | Ídem documents. |
+| `EXTRACT_UP_FLAGS` | `-d --build --wait` | Ídem extract, en modo desarrollo. Cambiar `--build` por `--pull=missing` **no** alcanza para usar GHCR: sin `-f`, Compose siempre lee el override y compila. Para eso está `RELEASE=1`. |
+| `DOCUMENTS_UP_FLAGS` | `-d --build --wait` | Ídem documents, en modo desarrollo. |
+| `RELEASE` | vacío | Vacío: desarrollo. `1`: [modo release](#modo-release-imágenes-de-ghcr). Otro valor es un error. |
+| `RELEASE_UP_FLAGS` | `-d --pull=missing --wait` | Flags de `up` de extract y documents con `RELEASE=1` (reemplazan a `EXTRACT_UP_FLAGS` y `DOCUMENTS_UP_FLAGS`). |
+| `EXTRACT_IMAGE_TAG` | el del `.env` de extract, o `latest` | Tag de `ghcr.io/juandelosrios124/extract-service` con `RELEASE=1`. Solo cuenta si se pasa en la línea de comandos con un valor. |
+| `DOCUMENTS_IMAGE_TAG` | el del `.env` de documents, o `latest` | Ídem `ghcr.io/olivettisantino/documents-service`. |
 | `S` | `documents` | Stack de `make logs`: `infra`, `extract` o `documents`. |
 | `TAIL` | `100` | Líneas previas de `make logs`. |
 | `SMOKE_PDF` | `$(EXTRACT_DIR)/tests/stress/pdfs/2020-Scrum-Guide-Spanish-Latin-South-American.pdf` | PDF que sube `make smoke`. |
@@ -88,10 +95,75 @@ documents arrancarían `healthy` sin registrarse en Consul (`403`), y en infra
 `consul-acl-init` fallaría. Por eso el Makefile no exporta ninguna variable y corre cada
 `docker compose` (y `smoke-traefik.sh`) con `env -u` de `CONSUL_HTTP_TOKEN`,
 `CONSUL_AGENT_TOKEN`, `CONSUL_TRAEFIK_TOKEN`, `CONSUL_EXTRACT_TOKEN`,
-`CONSUL_DOCUMENTS_TOKEN`, `CONSUL_HTTP_ADDR`, `CONSUL_ENABLED`, `COMPOSE_PROJECT_NAME` y
-`COMPOSE_FILE`. La única que se pasa explícita es `SHARED_NETWORK`. Cualquier otra
+`CONSUL_DOCUMENTS_TOKEN`, `CONSUL_HTTP_ADDR`, `CONSUL_ENABLED`, `COMPOSE_PROJECT_NAME`,
+`COMPOSE_FILE`, `EXTRACT_IMAGE_TAG` y `DOCUMENTS_IMAGE_TAG`. Las únicas que se pasan
+explícitas son `SHARED_NETWORK` y, con `RELEASE=1`, el tag que se le haya pasado a make
+(ver [Modo release](#modo-release-imágenes-de-ghcr)). Cualquier otra
 variable exportada (por ejemplo `LOG_LEVEL`) sigue pisando el `.env`, igual que con
 `docker compose` a mano.
+
+### Modo release (imágenes de GHCR)
+
+La CI de extract y de documents publica en GHCR una imagen por cada merge a `main`
+(`sha-<7>` y `latest`; ver "Imagen y releases" en el README de cada repo). `RELEASE=1`
+levanta esas imágenes, sin compilar:
+
+```bash
+make up RELEASE=1 EXTRACT_IMAGE_TAG=sha-ec5b762 DOCUMENTS_IMAGE_TAG=sha-3ef65f2
+make smoke
+make images   # lo que va en la fila "Imagen" del informe de una medición
+```
+
+`make images` muestra, por servicio:
+
+```text
+extract    5 replicas  ghcr.io/juandelosrios124/extract-service:sha-ec5b762  digest ghcr.io/juandelosrios124/extract-service@sha256:…  revision ec5b762…
+documents  1 replica   ghcr.io/olivettisantino/documents-service:sha-3ef65f2  digest ghcr.io/olivettisantino/documents-service@sha256:…  revision 3ef65f2…
+```
+
+**Cuándo usar cada modo.**
+
+- **Desarrollo** (`make up`): compila lo que tenés en la carpeta de cada repo, con tus
+  cambios sin commitear. Es el de todos los días.
+- **Release** (`make up RELEASE=1 …`): corre exactamente la imagen que construyó la CI
+  para un commit. Es el que se usa **para medir** (pruebas de carga, comparar
+  versiones): dos corridas con el mismo tag corren el mismo binario, y el digest de
+  `make images` lo identifica aunque el tag se mueva.
+
+**Qué cambia con `RELEASE=1`.** Solo extract y documents; infra es igual (no tiene build).
+
+- Se agrega `-f <ruta absoluta del repo>/docker-compose.yml`. Sin `-f`, Compose lee
+  siempre `docker-compose.override.yml`, que agrega `build: .` e `image: <repo>:dev`
+  ([Merge Compose files](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/)):
+  cambiar `--build` por `--pull=missing` no alcanza. La ruta es absoluta porque un `-f`
+  relativo se resuelve contra el directorio desde donde se corre, no contra
+  `--project-directory`.
+- `RELEASE_UP_FLAGS` (`-d --pull=missing --wait`) en lugar de `--build`. `missing` y no
+  `always`: un `sha-xxxxxxx` o un `vX.Y.Z` no cambia, así que bajarlo una vez alcanza.
+  La contra es `latest`: si ya está en la máquina, `missing` no lo vuelve a bajar (probado
+  con Compose 5.6.1). Para refrescarlo: `make pull RELEASE=1`.
+- El nombre del proyecto es el mismo con y sin `-f` (el de la carpeta, por
+  `--project-directory`; [Specify a project name](https://docs.docker.com/compose/how-tos/project-name/)).
+  Por eso `make down`, `make ps` y `make logs` funcionan igual sobre lo que levantó
+  cualquiera de los dos modos y no llevan `-f`: Compose encuentra los contenedores por el
+  proyecto y el servicio, que son los mismos.
+
+**Tags.** Se pasan como variables de make: `EXTRACT_IMAGE_TAG=sha-…` y
+`DOCUMENTS_IMAGE_TAG=sha-…`. Cada uno llega solo al compose de su servicio, y solo si se
+pasó en la línea de comandos con un valor. Si no, vale el `EXTRACT_IMAGE_TAG` /
+`DOCUMENTS_IMAGE_TAG` del `.env` de cada repo, y si tampoco está ahí, `latest`. Con
+`latest`, `make up RELEASE=1` avisa que la corrida no es reproducible, pero levanta igual.
+
+Un tag **exportado en la terminal no cuenta**: el Makefile lo borra con `env -u`, como
+los tokens. Si no, un `export EXTRACT_IMAGE_TAG=…` olvidado de otra medición cambiaría
+la imagen sin aparecer en el comando. Tampoco cuenta uno vacío (`EXTRACT_IMAGE_TAG=`):
+Make pasa al entorno de las recetas las variables de la línea de comandos aunque estén
+vacías, y vacío pisaría el `.env` y dejaría `latest`.
+
+**Cambiar de modo recrea los contenedores.** Cambia la imagen (`<repo>:dev` ↔
+`ghcr.io/…:sha-…`), así que el `up` del otro modo recrea las réplicas de extract y
+documents; Mongo y su volumen quedan como están. No hace falta `make down` antes. Volver a
+desarrollo es `make up` (recompila; `make images` vuelve a decir `build local`).
 
 ### Levantar un stack a mano
 

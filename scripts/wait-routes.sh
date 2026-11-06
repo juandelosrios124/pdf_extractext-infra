@@ -85,9 +85,9 @@ cat >&2 <<EOF
 [wait-routes] su registro (403) porque CONSUL_HTTP_TOKEN de su .env esta vacio o
 [wait-routes] no es el token de ese servicio (CONSUL_EXTRACT_TOKEN o
 [wait-routes] CONSUL_DOCUMENTS_TOKEN del .env de infra). Correr 'make check' y
-[wait-routes] buscar el 403 en los logs:
-[wait-routes]   docker compose --project-directory $EXTRACT_DIR logs --no-color extract | grep -E 'No se pudo registrar|403'
-[wait-routes]   docker compose --project-directory $DOCUMENTS_DIR logs --no-color documents | grep -E 'No se pudo registrar|403'
+[wait-routes] buscar el 403 en los logs (la linea "No se pudo registrar" trae el error):
+[wait-routes]   docker compose --project-directory $EXTRACT_DIR logs --no-color extract | grep 'No se pudo registrar'
+[wait-routes]   docker compose --project-directory $DOCUMENTS_DIR logs --no-color documents | grep 'No se pudo registrar'
 [wait-routes] Despues de corregir el .env: make up (recrea los contenedores con el token nuevo).
 [wait-routes] Si recien arrancaron, puede faltar tiempo: ROUTES_TIMEOUT=120 make wait-routes
 EOF

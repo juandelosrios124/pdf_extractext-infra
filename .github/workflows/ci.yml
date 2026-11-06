@@ -33,6 +33,12 @@ jobs:
       - name: shellcheck
         run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 scripts/*.sh
 
+      - name: Makefile (sin los otros repos)
+        # make help, orden de make -n up y make -n down, env -u de los tokens y
+        # los errores de make check, con carpetas temporales y un .env de
+        # prueba. No clona extract-service ni documents-service.
+        run: scripts/test-makefile.sh
+
       - name: traefik/dynamic.yml parsea
         run: pipx run yamllint==1.38.0 -d relaxed traefik/dynamic.yml
 

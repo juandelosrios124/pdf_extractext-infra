@@ -9,7 +9,108 @@ la red Docker `mired`, Consul (service discovery y health checks) y Traefik
 - [extract-service](https://github.com/juandelosrios124/extract-service)
 - [documents-service](https://github.com/OlivettiSantino/documents-service)
 
+## Levantar el sistema completo
+
+**Camino recomendado para desarrollar y probar.** El [`Makefile`](Makefile) levanta
+los tres repos en orden y por el mismo camino que el sistema real: Consul con ACL,
+Traefik y los servicios registrados con su token.
+
+Requisitos: los tres repos clonados en la misma carpeta padre (`pdf_extractext-infra`,
+`extract-service`, `documents-service`), cada uno con su `.env` (ver
+[Qué va en el `.env` de cada repo](#qué-va-en-el-env-de-cada-repo)), Docker con Compose
+v2, GNU Make, `curl` y `jq`.
+
+```bash
+make up      # check → red → infra → extract → documents → espera las rutas de Traefik
+make smoke   # POST /documents por Traefik (201 o 200 duplicate) y smoke-traefik.sh
+make ps      # estado de los tres stacks
+make down    # documents → extract → infra; conserva volúmenes y red
+```
+
+Funciona igual desde fish o cualquier otro shell: el Makefile fija `SHELL := bash`.
+`make` sin target muestra la ayuda.
+
+| Target | Qué hace |
+|---|---|
+| `help` | Lista los targets y las variables con su valor actual. Es el default. |
+| `check` | Precondiciones: existen las carpetas de los repos y su `.env`, los tokens no están vacíos, el `CONSUL_HTTP_TOKEN` de extract y de documents es el `CONSUL_EXTRACT_TOKEN` y el `CONSUL_DOCUMENTS_TOKEN` de infra, `CONSUL_ENABLED` no está apagado, el `EXTRACT_URL` de documents no apunta a `localhost`, y Docker responde. Junta todos los errores y cada uno dice qué hacer. **Nunca muestra tokens.** ([`scripts/check.sh`](scripts/check.sh)) |
+| `network` | Crea la red `SHARED_NETWORK` si no existe. Si ya está, no hace nada. |
+| `up` | `check` → `network` → infra `up -d --wait` → extract `up -d --build --wait` → documents `up -d --build --wait` → `wait-routes`. |
+| `wait-routes` | Espera hasta `ROUTES_TIMEOUT` s a que la API de Traefik muestre los routers `extract@consulcatalog` y `documents@consulcatalog` con servidores. ([`scripts/wait-routes.sh`](scripts/wait-routes.sh)) |
+| `down` | `docker compose down` en documents, extract e infra, en ese orden. **Sin `-v`** (conserva `consul_data` y la base de Mongo) y sin borrar la red. |
+| `ps` | `docker compose ps -a` de los tres stacks, con un título por stack. |
+| `logs` | `logs -f` de un stack: `make logs S=infra`, `S=extract` o `S=documents` (default). `TAIL` líneas previas. |
+| `smoke` | `wait-routes`, `POST /documents` por Traefik con un PDF de prueba de extract ([`scripts/smoke-documents.sh`](scripts/smoke-documents.sh)) y [`scripts/smoke-traefik.sh`](scripts/smoke-traefik.sh). |
+
+**Por qué `wait-routes`.** `docker compose up --wait` espera el healthcheck de Docker,
+no el check de Consul: una réplica entra en la rotación de Traefik unos segundos
+después, cuando su check pasa a `passing` (hasta un intervalo, 10 s). Sin esa espera,
+un `POST /documents` justo después del `up` puede recibir `404` de Traefik. Si vence
+`ROUTES_TIMEOUT`, la causa más probable es un `CONSUL_HTTP_TOKEN` vacío o equivocado:
+el contenedor arranca `healthy`, pero Consul rechaza su registro con `403` y Traefik
+nunca lo rutea. El mensaje de error dice cómo buscar el `403` en los logs.
+
+**`make up` es repetible.** Sobre un sistema ya levantado no recrea contenedores si
+nada cambió: el build sale de la caché, `consul-acl-init` vuelve a correr (es
+idempotente) y `wait-routes` pasa enseguida. Si cambió el `.env` o el código de un
+servicio, `make up` recrea solo esos contenedores.
+
+### Variables
+
+Se pasan en la línea de comandos (`make up EXTRACT_DIR=/otra/ruta`).
+
+| Variable | Default | Para qué |
+|---|---|---|
+| `EXTRACT_DIR` | `../extract-service` | Carpeta de extract-service, relativa a este repo o absoluta. |
+| `DOCUMENTS_DIR` | `../documents-service` | Carpeta de documents-service, relativa a este repo o absoluta. |
+| `SHARED_NETWORK` | `mired` | Red que crea `network`. Se pasa a los tres compose, así la red creada es la que usan. |
+| `ROUTES_TIMEOUT` | `60` | Segundos que espera `wait-routes`. |
+| `TRAEFIK_URL` | `http://127.0.0.1:8080` | Tráfico de Traefik (`TRAEFIK_PORT`), para `smoke`. |
+| `TRAEFIK_API` | `http://127.0.0.1:8081` | API de Traefik (`TRAEFIK_DASHBOARD_PORT`), para `wait-routes`. |
+| `INFRA_UP_FLAGS` | `-d --wait` | Flags de `docker compose up` de infra. |
+| `EXTRACT_UP_FLAGS` | `-d --build --wait` | Ídem extract. Cuando las imágenes vengan de un registry, `--build` pasa a `--pull=missing` sin tocar los targets. |
+| `DOCUMENTS_UP_FLAGS` | `-d --build --wait` | Ídem documents. |
+| `S` | `documents` | Stack de `make logs`: `infra`, `extract` o `documents`. |
+| `TAIL` | `100` | Líneas previas de `make logs`. |
+| `SMOKE_PDF` | `$(EXTRACT_DIR)/tests/stress/pdfs/2020-Scrum-Guide-Spanish-Latin-South-American.pdf` | PDF que sube `make smoke`. |
+
+### Cada stack usa el `.env` de su repo
+
+Cada stack se maneja con `docker compose --project-directory <repo>`. Compose toma el
+`.env` del directorio del proyecto, que es `--project-directory` si está
+([Interpolation, `.env` file](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file)),
+y el nombre del proyecto es el nombre de esa carpeta
+([Specify a project name](https://docs.docker.com/compose/how-tos/project-name/)).
+
+Pero Compose le da **prioridad a las variables del entorno del shell sobre el `.env`**.
+Un `CONSUL_HTTP_TOKEN` exportado en la terminal pisaría el token de cada repo: extract y
+documents arrancarían `healthy` sin registrarse en Consul (`403`), y en infra
+`consul-acl-init` fallaría. Por eso el Makefile no exporta ninguna variable y corre cada
+`docker compose` (y `smoke-traefik.sh`) con `env -u` de `CONSUL_HTTP_TOKEN`,
+`CONSUL_AGENT_TOKEN`, `CONSUL_TRAEFIK_TOKEN`, `CONSUL_EXTRACT_TOKEN`,
+`CONSUL_DOCUMENTS_TOKEN`, `CONSUL_HTTP_ADDR`, `CONSUL_ENABLED`, `COMPOSE_PROJECT_NAME` y
+`COMPOSE_FILE`. La única que se pasa explícita es `SHARED_NETWORK`. Cualquier otra
+variable exportada (por ejemplo `LOG_LEVEL`) sigue pisando el `.env`, igual que con
+`docker compose` a mano.
+
+### Levantar un stack a mano
+
+Es compatible: `make` y `docker compose` a mano usan los mismos proyectos de Compose
+(`pdf_extractext-infra`, `extract-service` y `documents-service`, el nombre de cada
+carpeta). `make ps` y `make down` ven lo que se levantó a mano, y `docker compose down`
+en un repo baja lo que levantó `make up`. Por ejemplo, para reconstruir solo extract
+después de un cambio, alcanza con `docker compose up -d --build --wait` en su carpeta.
+Lo único distinto: a mano, una variable exportada en el shell sí pisa el `.env`.
+
+### `uv run`
+
+`uv run` queda **solo para los tests unitarios** de cada servicio. Un servicio corriendo
+con `uv run` no pasa por Consul ni por Traefik, así que no prueba el camino real.
+
 ## Levantar la infraestructura
+
+Camino manual, solo infra. Para el sistema completo, ver
+[Levantar el sistema completo](#levantar-el-sistema-completo).
 
 ```bash
 # 1. Red compartida (una sola vez por máquina; la usan los tres repos)
@@ -384,8 +485,13 @@ salir siempre desregistra el servicio y borra el contenedor.
 en cada pull request. Los jobs que necesitan `.env` lo generan desde `.env.example`
 con un `uuidgen` nuevo para cada uno de los cinco tokens; el `.env` real nunca se usa.
 
-- **`lint`**: `actionlint` sobre el workflow, `shellcheck` sobre `scripts/*.sh`, y que
-  `traefik/dynamic.yml` (`yamllint -d relaxed`) y `consul/consul.json` (`jq`) parseen.
+- **`lint`**: `actionlint` sobre el workflow, `shellcheck` sobre `scripts/*.sh`, que
+  `traefik/dynamic.yml` (`yamllint -d relaxed`) y `consul/consul.json` (`jq`) parseen, y
+  [`scripts/test-makefile.sh`](scripts/test-makefile.sh): `make help` lista todos los
+  targets, el orden de `make -n up` y `make -n down` (este sin `-v`), que cada
+  `docker compose` corra con `env -u CONSUL_HTTP_TOKEN` y que `make check` falle con un
+  mensaje claro ante una carpeta inexistente o un `CONSUL_HTTP_TOKEN` vacío. Usa
+  carpetas temporales: la CI no clona extract-service ni documents-service.
 - **`compose`**: `docker compose config --quiet` resuelve sin errores y `.env` no está versionado.
 - **`consul-config`**: `consul validate` de `consul/consul.json` con la misma imagen
   del compose (la toma de `docker compose config`).
@@ -430,7 +536,8 @@ Los **valores** de los tokens, en cambio, son distintos en cada repo (ver
 ## Apagar
 
 ```bash
-docker compose down      # conserva los datos (volumen consul_data)
+make down                # los tres stacks: documents, extract e infra; conserva los volúmenes
+docker compose down      # solo infra; conserva los datos (volumen consul_data)
 ```
 
 `docker compose down -v` borra también el volumen (catálogo y estado de ACL). El

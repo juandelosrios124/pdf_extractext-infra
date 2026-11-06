@@ -53,11 +53,18 @@ jobs:
           fi
 
       - name: Generar .env de prueba
-        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
-        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        # Un UUID nuevo por token. Cada token va en su propia linea: si uuidgen
+        # falla, bash -e corta aca (dentro del argumento de sed no cortaria y
+        # quedaria vacio). El grep evita que un sed sin coincidencias deje la
+        # variable sin valor en silencio.
         run: |
-          token=$(uuidgen)
-          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+          cp .env.example .env
+          for var in CONSUL_HTTP_TOKEN CONSUL_AGENT_TOKEN CONSUL_TRAEFIK_TOKEN \
+                     CONSUL_EXTRACT_TOKEN CONSUL_DOCUMENTS_TOKEN; do
+            grep -q "^$var=" .env || { echo "::error file=.env.example::falta $var"; exit 1; }
+            token=$(uuidgen)
+            sed -i "s/^$var=.*/$var=$token/" .env
+          done
 
       - name: docker compose config
         run: docker compose config --quiet
@@ -69,11 +76,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Generar .env de prueba
-        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
-        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        # Un UUID nuevo por token. Cada token va en su propia linea: si uuidgen
+        # falla, bash -e corta aca (dentro del argumento de sed no cortaria y
+        # quedaria vacio). El grep evita que un sed sin coincidencias deje la
+        # variable sin valor en silencio.
         run: |
-          token=$(uuidgen)
-          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+          cp .env.example .env
+          for var in CONSUL_HTTP_TOKEN CONSUL_AGENT_TOKEN CONSUL_TRAEFIK_TOKEN \
+                     CONSUL_EXTRACT_TOKEN CONSUL_DOCUMENTS_TOKEN; do
+            grep -q "^$var=" .env || { echo "::error file=.env.example::falta $var"; exit 1; }
+            token=$(uuidgen)
+            sed -i "s/^$var=.*/$var=$token/" .env
+          done
 
       - name: consul validate (misma imagen que el compose)
         # data_dir no esta en consul.json: en el compose lo pasa el entrypoint
@@ -95,13 +109,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Generar .env de prueba
-        # El token va en su propia linea: si uuidgen falla, bash -e corta aca
-        # (dentro del argumento de sed no cortaria y quedaria un token vacio).
+        # Un UUID nuevo por token. Cada token va en su propia linea: si uuidgen
+        # falla, bash -e corta aca (dentro del argumento de sed no cortaria y
+        # quedaria vacio). El grep evita que un sed sin coincidencias deje la
+        # variable sin valor en silencio.
         run: |
-          token=$(uuidgen)
-          sed "s/^CONSUL_HTTP_TOKEN=.*/CONSUL_HTTP_TOKEN=$token/" .env.example > .env
+          cp .env.example .env
+          for var in CONSUL_HTTP_TOKEN CONSUL_AGENT_TOKEN CONSUL_TRAEFIK_TOKEN \
+                     CONSUL_EXTRACT_TOKEN CONSUL_DOCUMENTS_TOKEN; do
+            grep -q "^$var=" .env || { echo "::error file=.env.example::falta $var"; exit 1; }
+            token=$(uuidgen)
+            sed -i "s/^$var=.*/$var=$token/" .env
+          done
 
-      - name: Levantar consul y traefik
+      - name: Levantar consul, consul-acl-init y traefik
+        # --wait espera a que consul y traefik esten healthy y a que el
+        # one-shot consul-acl-init termine con exit 0 (si falla, falla el up).
         run: |
           docker network create mired
           docker compose up -d --wait --wait-timeout 120
@@ -124,6 +147,11 @@ jobs:
           curl -s 127.0.0.1:8081/api/overview | jq -c .providers \
             | tee /dev/stderr \
             | jq -e 'index("ConsulCatalog") != null and index("File") != null'
+
+      - name: smoke-acl.sh
+        # default_policy deny: 403 sin token y con el token de otro servicio,
+        # Traefik solo lectura, catalogo anonimo vacio y agente sin errores.
+        run: scripts/smoke-acl.sh
 
       - name: smoke-traefik.sh
         run: scripts/smoke-traefik.sh

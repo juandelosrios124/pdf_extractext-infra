@@ -34,6 +34,10 @@ if [[ -z "${CONSUL_HTTP_TOKEN:-}" && -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+# Con default_policy deny hace falta un token con service:write sobre
+# "smoke-timeouts". Se usa el de management (CONSUL_HTTP_TOKEN, solo infra) porque es
+# una prueba de la infraestructura: no tiene sentido una policy y un token
+# permanentes para un servicio de prueba. Traefik lo lee con su propio token.
 : "${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN (entorno o ENV_FILE)}"
 NETWORK="${SHARED_NETWORK:-mired}"
 CONSUL_URL="http://127.0.0.1:${CONSUL_UI_PORT:-8500}"

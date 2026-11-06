@@ -3,19 +3,28 @@
 # La red es externa y compartida por los tres repos; se crea una sola vez:
 #
 #   docker network create mired
-#   cp .env.example .env   # y completar CONSUL_HTTP_TOKEN
-#   docker compose up -d
+#   cp .env.example .env   # y completar los tokens de Consul (uuidgen)
+#   docker compose up -d --wait
+#
+# ACL con default_policy deny: consul-acl-init (one-shot) crea las policies de
+# consul/policies/ y un token por componente antes de que arranque Traefik.
 
 services:
   consul:
-    image: hashicorp/consul:2.0.4@sha256:1c59f007df8ea1c21b2558dc73ef8d99047bc895d9e52e635d1e745e35fe9a54
+    image: &consul-image hashicorp/consul:2.0.4@sha256:1c59f007df8ea1c21b2558dc73ef8d99047bc895d9e52e635d1e745e35fe9a54
     # El entrypoint de la imagen agrega -data-dir y -config-dir; el resto de la
     # configuracion esta en consul/consul.json.
     command: agent
     environment:
-      # El token de ACL no se versiona: el entrypoint escribe esta variable en
-      # /consul/config/local.json y Consul la mezcla con consul.json.
-      CONSUL_LOCAL_CONFIG: '{"acl":{"tokens":{"initial_management":"${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}"}}}'
+      # Los tokens de ACL no se versionan: el entrypoint escribe esta variable
+      # en /consul/config/local.json y Consul la mezcla con consul.json.
+      # initial_management: token de management (solo infra).
+      # agent: token del propio agente (policy consul/policies/agent.hcl) para
+      # mantener su nodo en el catalogo. Va en la configuracion y no con
+      # "consul acl set-agent-token": un token persistido por la API le gana
+      # al de la configuracion y quedaria escondido en el volumen. En un
+      # volumen nuevo el token existe recien cuando termina consul-acl-init.
+      CONSUL_LOCAL_CONFIG: '{"acl":{"tokens":{"initial_management":"${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}","agent":"${CONSUL_AGENT_TOKEN:?Definir CONSUL_AGENT_TOKEN en .env (generarlo con uuidgen)}"}}}'
       # Lo usa la CLI de consul dentro del contenedor (docker compose exec).
       CONSUL_HTTP_TOKEN: ${CONSUL_HTTP_TOKEN}
     volumes:
@@ -39,6 +48,33 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Bootstrap de ACL (one-shot): crea o actualiza las policies de
+  # consul/policies/ y los tokens de agent, traefik, extract y documents con
+  # los SecretIDs del .env. Es idempotente y corre en cada "up"; Traefik
+  # arranca recien cuando termina bien. Es el unico que usa el token de
+  # management. Ver scripts/acl-bootstrap.sh.
+  consul-acl-init:
+    image: *consul-image
+    entrypoint: ["/bin/sh", "/acl-bootstrap.sh"]
+    user: consul
+    environment:
+      CONSUL_HTTP_ADDR: http://consul:8500
+      CONSUL_HTTP_TOKEN: ${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}
+      CONSUL_AGENT_TOKEN: ${CONSUL_AGENT_TOKEN:?Definir CONSUL_AGENT_TOKEN en .env (generarlo con uuidgen)}
+      CONSUL_TRAEFIK_TOKEN: ${CONSUL_TRAEFIK_TOKEN:?Definir CONSUL_TRAEFIK_TOKEN en .env (generarlo con uuidgen)}
+      CONSUL_EXTRACT_TOKEN: ${CONSUL_EXTRACT_TOKEN:?Definir CONSUL_EXTRACT_TOKEN en .env (generarlo con uuidgen)}
+      CONSUL_DOCUMENTS_TOKEN: ${CONSUL_DOCUMENTS_TOKEN:?Definir CONSUL_DOCUMENTS_TOKEN en .env (generarlo con uuidgen)}
+      POLICIES_DIR: /policies
+    volumes:
+      - ./scripts/acl-bootstrap.sh:/acl-bootstrap.sh:ro
+      - ./consul/policies:/policies:ro
+    networks:
+      - mired
+    depends_on:
+      consul:
+        condition: service_healthy
+    restart: "no"
+
   # Traefik: gateway del sistema. Descubre los servicios en el catalogo de
   # Consul y arma routers/services/middlewares a partir de los tags del
   # registro (no de labels de Docker: no hay provider docker ni docker.sock).
@@ -46,7 +82,7 @@ services:
     image: traefik:v3.7.17@sha256:68ae5fe5b64ca166704b746a9e8afcd385e36b3f569a5691401bf652d57b3748
     # Configuracion estatica solo por flags: Traefik acepta una unica fuente
     # (archivo, CLI o entorno, mutuamente excluyentes) y por CLI Compose puede
-    # interpolar CONSUL_HTTP_TOKEN desde .env. La dinamica va en
+    # interpolar CONSUL_TRAEFIK_TOKEN desde .env. La dinamica va en
     # traefik/dynamic.yml (provider file).
     command:
       # Entrypoints: "web" para el trafico; "traefik" interno para dashboard,
@@ -73,7 +109,9 @@ services:
       # instancias con todos los checks en passing (el default admite warning).
       - --providers.consulcatalog=true
       - --providers.consulcatalog.endpoint.address=consul:8500
-      - --providers.consulcatalog.endpoint.token=${CONSUL_HTTP_TOKEN:?Definir CONSUL_HTTP_TOKEN en .env (generarlo con uuidgen)}
+      # Token propio de Traefik: solo lectura de servicios y nodos
+      # (consul/policies/traefik.hcl). Lo crea consul-acl-init.
+      - --providers.consulcatalog.endpoint.token=${CONSUL_TRAEFIK_TOKEN:?Definir CONSUL_TRAEFIK_TOKEN en .env (generarlo con uuidgen)}
       - --providers.consulcatalog.exposedbydefault=false
       # Sin watch Traefik consulta el catalogo cada 15 s (refreshInterval).
       - --providers.consulcatalog.watch=true
@@ -101,6 +139,9 @@ services:
     depends_on:
       consul:
         condition: service_healthy
+      # Sin su token creado, Traefik arrancaria sin ver el catalogo.
+      consul-acl-init:
+        condition: service_completed_successfully
     healthcheck:
       # Subcomando de la imagen: consulta /ping del entrypoint "traefik" (:8080).
       test: ["CMD", "traefik", "healthcheck", "--ping"]

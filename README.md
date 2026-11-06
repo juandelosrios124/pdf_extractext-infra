@@ -15,34 +15,189 @@ la red Docker `mired`, Consul (service discovery y health checks) y Traefik
 # 1. Red compartida (una sola vez por máquina; la usan los tres repos)
 docker network create mired
 
-# 2. Variables: completar CONSUL_HTTP_TOKEN con un UUID (uuidgen)
+# 2. Variables: completar los cinco tokens de Consul con UUID distintos
+#    (uuidgen; ver "ACL" más abajo)
 cp .env.example .env
 
-# 3. Consul + Traefik (Traefik arranca recién cuando Consul está healthy)
+# 3. Consul, bootstrap de ACL y Traefik. Traefik arranca recién cuando Consul
+#    está healthy y consul-acl-init terminó bien.
 docker compose up -d --wait
-docker compose ps        # consul y traefik deben quedar (healthy)
+docker compose ps -a     # consul y traefik (healthy); consul-acl-init Exited (0)
 ```
 
 ## Consul
 
-Servidor único con UI y ACL (`default_policy: allow`), basado en el
+Servidor único con UI y ACL (`default_policy: deny`, ver [ACL](#acl)), basado en el
 [ejemplo de la cátedra](https://github.com/frsrpprats/microservicios/tree/main/consul).
 Imagen fija `hashicorp/consul:2.0.4`.
 
 - **UI y API desde el host:** <http://127.0.0.1:8500/ui> (publicada solo en 127.0.0.1).
 - **Desde contenedores en `mired`:** `http://consul:8500`.
-- **Token de ACL:** se toma de `CONSUL_HTTP_TOKEN` (`.env`, no versionado) y se
-  inyecta como `initial_management`; no está en `consul/consul.json`. Con
-  `default_policy: allow` registrar y consultar servicios no lo requiere; sí las
-  operaciones de administración de ACL (header `X-Consul-Token`).
+- **Tokens de ACL:** salen del `.env` (no versionado) y se inyectan por
+  `CONSUL_LOCAL_CONFIG`; no están en `consul/consul.json`. Sin token no se puede
+  registrar nada y las lecturas vuelven vacías. Ver [ACL](#acl).
 
-Comprobación rápida:
+Comprobación rápida (`/v1/status/*` no pide token):
 
 ```bash
 curl http://127.0.0.1:8500/v1/status/leader      # "IP:8300"
-curl http://127.0.0.1:8500/v1/catalog/services   # {"consul":[]}
+curl http://127.0.0.1:8500/v1/catalog/services   # {}: sin token no se ve nada
+docker compose exec consul consul catalog services   # con el token de management del contenedor
 docker run --rm --network mired busybox wget -qO- http://consul:8500/v1/status/leader
 ```
+
+## ACL
+
+Con Traefik leyendo los tags del catálogo, **quien puede registrar en Consul
+controla el ruteo**: con `default_policy: allow` cualquier contenedor de `mired`
+podía registrar un `extract` falso con tags de Traefik y desviar el tráfico.
+Por eso Consul corre con `default_policy: deny` y cada componente tiene su propio
+token con lo mínimo que necesita.
+
+### Tokens y policies
+
+Las policies están versionadas en [`consul/policies/`](consul/policies/), una por
+archivo (`<nombre>.hcl` → policy `<nombre>`). Los SecretID los genera cada
+integrante con `uuidgen` y van solo en su `.env`.
+
+| Variable (`.env` de infra) | Policy | Reglas | Quién lo usa | Por qué es el mínimo |
+|---|---|---|---|---|
+| `CONSUL_HTTP_TOKEN` | `global-management` | todo | `consul-acl-init`, la CLI dentro del contenedor de consul y los smoke tests de infra | Es el `initial_management`. **Solo infra**: no se copia a ningún otro repo. |
+| `CONSUL_AGENT_TOKEN` | `agent` | `node "ds"` write, `service_prefix ""` read | el propio agente de Consul (`acl.tokens.agent`) | Lo que pide la [documentación del token de agente](https://developer.hashicorp.com/consul/docs/v2.0.x/secure/acl/token/agent): `node:write` sobre su nodo para mantenerlo en el catálogo (anti-entropy, coordenadas) y `service:read`. |
+| `CONSUL_TRAEFIK_TOKEN` | `traefik` | `service_prefix ""` read, `node_prefix ""` read | Traefik (`providers.consulcatalog.endpoint.token`) | Traefik solo lee `/v1/catalog/services` y `/v1/health/service/<nombre>`. Consul filtra esas respuestas por servicio **y por nodo**: sin `node:read` las dos vuelven vacías. Sin ningún write. |
+| `CONSUL_EXTRACT_TOKEN` | `extract` | `service "extract"` write | extract-service | Registrar y desregistrar sus réplicas (y sus checks). No puede registrar otro nombre. |
+| `CONSUL_DOCUMENTS_TOKEN` | `documents` | `service "documents"` write | documents-service | Ídem para `documents`. No lee `extract`: a extract lo descubre Traefik. |
+
+El token del agente va en la configuración (`CONSUL_LOCAL_CONFIG`), no con
+`consul acl set-agent-token`. Con `enable_token_persistence` el token que se fija
+por la API se guarda en `/consul/data/acl-tokens.json` y **le gana** al de la
+configuración en cada reinicio, así que un cambio en el `.env` dejaría de tener
+efecto. Si alguien lo usó, el log de Consul lo avisa con `"agent" token present
+in both the configuration and persisted token store`.
+
+`down_policy` queda explícito en `extend-cache`, que ya es el default. Solo se
+aplica cuando no se puede resolver un token contra el líder. Con un servidor
+único eso pasa solo mientras no hay líder (por ejemplo, durante un reinicio). En
+ese caso `extend-cache` sigue aceptando los tokens que ya estaban en caché, en
+lugar de rechazar todo (`deny`) o aceptar todo (`allow`). Va explícito porque
+HashiCorp avisa que algunos defaults de ACL van a cambiar.
+
+### Generar los tokens
+
+Cinco UUID distintos en el `.env` de infra. `CONSUL_HTTP_TOKEN` ya existe si la
+infra estaba levantada: **no cambiarlo**, porque es el `initial_management` del
+volumen. Los otros cuatro, en fish, para pegar en el `.env`:
+
+```fish
+for v in AGENT TRAEFIK EXTRACT DOCUMENTS; echo "CONSUL_"$v"_TOKEN="(uuidgen); end
+```
+
+Después, `docker compose up -d --wait`. `consul-acl-init`
+([`scripts/acl-bootstrap.sh`](scripts/acl-bootstrap.sh)) corre en cada `up` y deja
+creadas o actualizadas las policies y los tokens con esos SecretID:
+
+- es idempotente: correrlo de nuevo actualiza en vez de duplicar
+  (`docker compose run --rm consul-acl-init` lo corre a mano);
+- si cambia un SecretID del `.env` (rotación), crea el token nuevo y borra el
+  anterior de ese servicio;
+- falla si falta un token, si alguno no es un UUID o si dos se repiten;
+- nunca imprime SecretIDs, solo AccessorIDs.
+
+### Qué va en el `.env` de cada repo
+
+| Repo | Variable | Valor |
+|---|---|---|
+| infra | `CONSUL_HTTP_TOKEN`, `CONSUL_AGENT_TOKEN`, `CONSUL_TRAEFIK_TOKEN`, `CONSUL_EXTRACT_TOKEN`, `CONSUL_DOCUMENTS_TOKEN` | Los cinco UUID. |
+| extract-service | `CONSUL_HTTP_TOKEN` | El valor de `CONSUL_EXTRACT_TOKEN` de infra. |
+| documents-service | `CONSUL_HTTP_TOKEN` | El valor de `CONSUL_DOCUMENTS_TOKEN` de infra. |
+
+El nombre de la variable en extract y documents no cambia; cambia el valor. Después
+de cambiarlo, recrear los contenedores (`docker compose up -d --wait` en cada repo).
+Cada réplica se desregistra con el token viejo al apagarse y se registra con el nuevo.
+
+### Migración desde `allow`
+
+Una réplica registrada con `allow` y **sin token** no puede desregistrarse cuando
+Consul ya está en `deny`: al apagarse recibe `403`. Su entrada queda en el
+catálogo congelada en `passing` y el agente loguea `agent: Service registration
+blocked by ACLs ... accessorID="anonymous token"`. Traefik puede seguir mandándole
+tráfico a una IP que ya no es de esa réplica. Orden para pasar a `deny`:
+
+1. `docker compose down` en extract-service y documents-service (todavía con
+   `allow`, se desregistran bien).
+2. Agregar los tokens al `.env` de infra y `docker compose up -d --wait`.
+3. Poner el token de cada servicio en su `.env` y `docker compose up -d --wait` en cada repo.
+
+Si ya quedaron entradas fantasma, desregistrarlas con el token de management. Son los
+ID registrados que no son el hostname de ningún contenedor vivo:
+
+```bash
+docker compose exec consul sh -c 'curl -s -H "X-Consul-Token: $CONSUL_HTTP_TOKEN" 127.0.0.1:8500/v1/agent/services' | jq -r '.[].ID'
+docker ps -q | xargs docker inspect -f '{{.Config.Hostname}}'
+docker compose exec consul consul services deregister -id <ID>
+```
+
+### UI y API con token
+
+- **UI:** <http://127.0.0.1:8500/ui> → *Log in* → pegar un token. Para administrar,
+  el de management (`CONSUL_HTTP_TOKEN`). Para solo mirar servicios y nodos alcanza
+  el de Traefik, que es de solo lectura. Sin login la UI no muestra nada.
+- **API:** el token va en el header `X-Consul-Token`. Sin token, las lecturas
+  devuelven `200` con el resultado vacío (`{}` o `[]`), no `403`. Por ejemplo, con
+  el token de Traefik:
+
+  ```bash
+  # bash: cargar el .env sin imprimirlo
+  set -a; . ./.env; set +a
+  curl -s -H "X-Consul-Token: $CONSUL_TRAEFIK_TOKEN" "http://127.0.0.1:8500/v1/health/service/extract?passing"
+  ```
+
+  ```fish
+  # fish: tomar una sola variable del .env sin imprimirla
+  set -l token (string match -rg '^CONSUL_TRAEFIK_TOKEN=(.*)' < .env)
+  curl -s -H "X-Consul-Token: $token" "http://127.0.0.1:8500/v1/health/service/extract?passing"
+  ```
+
+- **CLI dentro del contenedor:** `docker compose exec consul consul ...` ya tiene el
+  token de management en su entorno (`consul catalog services`,
+  `consul acl token list`). Ojo: `consul acl token list` muestra los SecretID.
+
+### Comprobar
+
+```bash
+scripts/smoke-acl.sh
+```
+
+Contra el Consul levantado comprueba:
+
+1. registrar sin token → `403`;
+2. el token de extract registra y desregistra `extract`, y recibe `403` con `documents`;
+3. lo mismo, al revés, con el token de documents;
+4. el token de Traefik lee el catálogo y health con los datos del nodo, y recibe `403` al registrar;
+5. sin token `/v1/catalog/services` devuelve `200 {}` (Consul 2.0.4 filtra, no rechaza);
+6. el token del agente tiene la policy `agent`, el nodo `ds` tiene sus direcciones en el
+   catálogo y, desde que terminó `consul-acl-init`, el log de Consul no tiene errores de
+   ACL del agente (por ejemplo `agent: Coordinate update blocked by ACLs`, o
+   `Service registration blocked by ACLs` si quedaron réplicas registradas sin token:
+   ver [Migración desde `allow`](#migración-desde-allow)). `SINCE=<fecha>` cambia el
+   inicio de esa ventana.
+
+Toma los tokens del entorno o del `.env` y nunca los imprime. Los servicios de prueba
+no tienen tags de Traefik, así que no reciben tráfico aunque extract y documents estén
+levantados.
+
+### Rollback
+
+Para volver a `allow` sin tocar tokens ni servicios:
+
+1. En [`consul/consul.json`](consul/consul.json), `"default_policy": "allow"`.
+2. `docker compose up -d --force-recreate --wait consul` (recrear y no solo reiniciar:
+   `consul.json` se monta como archivo, y si el editor lo reemplaza un `restart`
+   puede seguir viendo el viejo).
+
+Los tokens y policies siguen existiendo y los servicios siguen funcionando con sus
+tokens. Lo que cambia es que todo lo que no está cubierto por una regla vuelve a
+estar permitido, incluso sin token. No hace falta borrar el volumen.
 
 ## Traefik
 
@@ -61,7 +216,8 @@ monta `docker.sock`: los labels de Docker no se usan.
   pasa a `critical`, Traefik la saca del balanceo.
 - `watch=true`: Traefik se entera de los cambios del catálogo al instante, sin
   esperar el polling de 15 s.
-- Se conecta a `consul:8500` con el token `CONSUL_HTTP_TOKEN`.
+- Se conecta a `consul:8500` con su propio token, `CONSUL_TRAEFIK_TOKEN`, de solo
+  lectura (ver [ACL](#acl)).
 
 Los circuit breakers, retries y demás middlewares **no** se configuran acá: los
 declara cada servicio en sus tags. Lo que no se puede expresar con tags (por
@@ -118,6 +274,7 @@ curl -s 127.0.0.1:8081/ping                  # OK
 curl -s 127.0.0.1:8081/api/overview          # providers: ConsulCatalog y File
 curl -i 127.0.0.1:8080/extract               # 404 mientras no haya servicios registrados
 curl -s 127.0.0.1:8081/metrics | head        # métricas traefik_*
+scripts/smoke-acl.sh                         # ACL: 403 sin token o con el token de otro servicio (ver ACL)
 scripts/smoke-traefik.sh                     # whoami de prueba registrado en Consul y ruteado por Traefik
 scripts/smoke-timeouts.sh                    # presupuesto de timeouts (200 a 20 s, 504 a 25 s); ~1,5 min
 ```
@@ -126,7 +283,9 @@ scripts/smoke-timeouts.sh                    # presupuesto de timeouts (200 a 20
 Consul con tags de Traefik y un check HTTP, espera a que esté `passing` y
 comprueba que `127.0.0.1:8080/whoami` responda `200`. Al terminar (bien o mal)
 lo desregistra y borra el contenedor. Toma `CONSUL_HTTP_TOKEN` del entorno o,
-si no está, del `.env` (otro archivo con `ENV_FILE=...`).
+si no está, del `.env` (otro archivo con `ENV_FILE=...`). Registra con el token de
+management porque es una prueba de la infraestructura (lo mismo
+`smoke-timeouts.sh`); Traefik lo ve con su propio token.
 
 Logs de acceso (JSON, uno por pedido, con `X-Request-ID`):
 
@@ -223,17 +382,19 @@ salir siempre desregistra el servicio y borra el contenedor.
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) corre en cada push a `main` y
 en cada pull request. Los jobs que necesitan `.env` lo generan desde `.env.example`
-con un token de prueba (`uuidgen`); el `.env` real nunca se usa.
+con un `uuidgen` nuevo para cada uno de los cinco tokens; el `.env` real nunca se usa.
 
 - **`lint`**: `actionlint` sobre el workflow, `shellcheck` sobre `scripts/*.sh`, y que
   `traefik/dynamic.yml` (`yamllint -d relaxed`) y `consul/consul.json` (`jq`) parseen.
 - **`compose`**: `docker compose config --quiet` resuelve sin errores y `.env` no está versionado.
 - **`consul-config`**: `consul validate` de `consul/consul.json` con la misma imagen
   del compose (la toma de `docker compose config`).
-- **`smoke`** (después de `lint` y `compose`): `docker compose up -d --wait`, Consul con
-  líder, Traefik responde `/ping` con los providers ConsulCatalog y File, y pasan
-  `scripts/smoke-traefik.sh` y `scripts/smoke-timeouts.sh`. Si falla, muestra `docker compose logs`; siempre
-  termina con `docker compose down -v`.
+- **`smoke`** (después de `lint` y `compose`): `docker compose up -d --wait` (incluye que
+  `consul-acl-init` termine bien), Consul con líder, Traefik responde `/ping` con los
+  providers ConsulCatalog y File, y pasan `scripts/smoke-acl.sh`,
+  `scripts/smoke-traefik.sh` y `scripts/smoke-timeouts.sh`. Si falla, muestra
+  `docker compose logs`; siempre termina con `docker compose down -v` (en CI el volumen
+  es descartable).
 
 Las imágenes de Consul y Traefik están fijadas por tag **y digest** en el compose.
 Para actualizar una versión, cambiar el tag y obtener el digest nuevo con
@@ -242,11 +403,17 @@ Para actualizar una versión, cambiar el tag y obtener el digest nuevo con
 ## Variables compartidas
 
 Los tres repos usan **estos mismos nombres**. Si se cambia alguno, cambiarlo en todos.
+Los **valores** de los tokens, en cambio, son distintos en cada repo (ver
+[Qué va en el `.env` de cada repo](#qué-va-en-el-env-de-cada-repo)).
 
 | Variable | Default | La usan | Descripción |
 |---|---|---|---|
 | `SHARED_NETWORK` | `mired` | infra, extract, documents | Nombre de la red Docker externa compartida. |
-| `CONSUL_HTTP_TOKEN` | *(obligatoria, sin default)* | infra, extract, documents | Token de ACL de Consul (UUID, `uuidgen`). Mismo valor en los tres `.env`; nunca en el repo. También lo usa Traefik para leer el catálogo. |
+| `CONSUL_HTTP_TOKEN` | *(obligatoria, sin default)* | infra, extract, documents | Token de ACL de Consul (UUID). **Un valor distinto en cada repo:** en infra es el de management (solo infra); en extract, el valor de `CONSUL_EXTRACT_TOKEN`; en documents, el de `CONSUL_DOCUMENTS_TOKEN`. Nunca en el repo. |
+| `CONSUL_AGENT_TOKEN` | *(obligatoria)* | infra | Token del agente de Consul (policy `agent`). |
+| `CONSUL_TRAEFIK_TOKEN` | *(obligatoria)* | infra | Token de Traefik, solo lectura (policy `traefik`). |
+| `CONSUL_EXTRACT_TOKEN` | *(obligatoria)* | infra (se copia a extract) | Token de extract (policy `extract`). Va como `CONSUL_HTTP_TOKEN` en el `.env` de extract-service. |
+| `CONSUL_DOCUMENTS_TOKEN` | *(obligatoria)* | infra (se copia a documents) | Token de documents (policy `documents`). Va como `CONSUL_HTTP_TOKEN` en el `.env` de documents-service. |
 | `CONSUL_HTTP_ADDR` | `http://consul:8500` | extract, documents | URL de Consul desde la red `mired`. |
 | `CONSUL_ENABLED` | `false` | extract, documents | Activa el registro/discovery. Sin Consul los servicios funcionan igual. |
 | `CONSUL_UI_PORT` | `8500` | infra | Puerto del host para la UI/API, siempre en `127.0.0.1`. |
@@ -266,5 +433,7 @@ Los tres repos usan **estos mismos nombres**. Si se cambia alguno, cambiarlo en 
 docker compose down      # conserva los datos (volumen consul_data)
 ```
 
-`docker compose down -v` borra también el volumen (catálogo y estado de ACL).
+`docker compose down -v` borra también el volumen (catálogo y estado de ACL). El
+siguiente `up` vuelve a crear las policies y los tokens con los mismos SecretID del
+`.env`, pero se pierde todo lo que se haya creado a mano.
 La red `mired` no la borra este compose, porque es externa.

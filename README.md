@@ -40,6 +40,7 @@ Funciona igual desde fish o cualquier otro shell: el Makefile fija `SHELL := bas
 | `pull` | Solo con `RELEASE=1`: baja de GHCR las imágenes de extract y documents sin levantar nada. Sirve para refrescar `latest`. |
 | `wait-routes` | Espera hasta `ROUTES_TIMEOUT` s a que la API de Traefik muestre los routers `extract@consulcatalog` y `documents@consulcatalog` con servidores. ([`scripts/wait-routes.sh`](scripts/wait-routes.sh)) |
 | `images` | Para extract y documents corriendo: imagen configurada, digest del registry (`RepoDigests`) y label `org.opencontainers.image.revision`, una línea por imagen distinta (no por réplica). En desarrollo dice `build local, sin digest`. ([`scripts/images.sh`](scripts/images.sh)) |
+| `scan` | Grype sobre las imágenes que están corriendo en los tres stacks (Traefik, Consul, Mongo, extract y documents). **Informativo**: no falla por hallazgos. Grype corre como contenedor con versión fijada y sin montar `docker.sock`. ([`scripts/scan.sh`](scripts/scan.sh), [Escaneo de imágenes](#escaneo-de-imágenes)) |
 | `down` | `docker compose down` en documents, extract e infra, en ese orden. **Sin `-v`** (conserva `consul_data` y la base de Mongo) y sin borrar la red. |
 | `ps` | `docker compose ps -a` de los tres stacks, con un título por stack. |
 | `logs` | `logs -f` de un stack: `make logs S=infra`, `S=extract` o `S=documents` (default). `TAIL` líneas previas. |
@@ -567,6 +568,9 @@ con un `uuidgen` nuevo para cada uno de los cinco tokens; el `.env` real nunca s
 - **`compose`**: `docker compose config --quiet` resuelve sin errores y `.env` no está versionado.
 - **`consul-config`**: `consul validate` de `consul/consul.json` con la misma imagen
   del compose (la toma de `docker compose config`).
+- **`scan`**: Grype sobre las imágenes de terceros del compose (Traefik y Consul). Es
+  **informativo**: no falla por hallazgos y deja una tabla por imagen en el resumen del
+  job. Ver [Escaneo de imágenes](#escaneo-de-imágenes).
 - **`smoke`** (después de `lint` y `compose`): `docker compose up -d --wait` (incluye que
   `consul-acl-init` termine bien), Consul con líder, Traefik responde `/ping` con los
   providers ConsulCatalog y File, y pasan `scripts/smoke-acl.sh`,
@@ -577,6 +581,54 @@ con un `uuidgen` nuevo para cada uno de los cinco tokens; el `.env` real nunca s
 Las imágenes de Consul y Traefik están fijadas por tag **y digest** en el compose.
 Para actualizar una versión, cambiar el tag y obtener el digest nuevo con
 `docker buildx imagetools inspect <imagen>:<tag>` (campo `Digest`).
+
+## Escaneo de imágenes
+
+Los tres repos escanean con [Grype](https://github.com/anchore/grype), siempre con la
+versión del escáner fijada: así un hallazgo nuevo es un hallazgo nuevo, y no que salió
+un Grype distinto.
+
+| Repo | Qué escanea | Si encuentra algo |
+|---|---|---|
+| extract-service | la imagen que acaba de construir, antes de publicarla en GHCR (y `pip-audit` sus dependencias Python) | **corta su CI** con `high` o `critical` que tenga fix |
+| documents-service | lo mismo, su propia imagen | **corta su CI**, igual que extract |
+| infra (este repo) | las imágenes de terceros que levanta: Traefik y Consul | **solo informa** |
+
+**Por qué en infra solo informa.** Traefik y Consul no son nuestras: no se parchean, se
+sube la versión. Cortar la CI por un hallazgo no deja nada que hacer en el PR que lo
+encontró, y bloquearía cambios que no tienen nada que ver; la actualización va en su
+propia issue. El job sí falla si Grype **no llega a escanear** una imagen: eso es un
+problema del escaneo, no un hallazgo.
+
+El job `scan` de la CI toma la lista de `docker compose config --images`, no de una lista
+aparte que se desincronizaría de los tags y digests fijados en
+[`docker-compose.yml`](docker-compose.yml). `consul` y `consul-acl-init` comparten
+imagen: se escanea una sola vez.
+
+### `make scan`
+
+Con el sistema levantado, `make scan` escanea **lo que está corriendo** en los tres
+stacks: Traefik, Consul, Mongo, extract y documents.
+
+```bash
+make up          # o make up RELEASE=1 EXTRACT_IMAGE_TAG=sha-… …
+make scan
+```
+
+La lista sale de la misma lógica que `make images` (`scripts/images.sh --list`), así que
+se escanea la imagen que el contenedor corre de verdad, no lo que hoy apunta el tag:
+
+- Imagen de un registry (tiene digest): `registry:<repo>@<digest>`, que Grype baja por su
+  cuenta.
+- Imagen construida en la máquina (`extract-service:dev`, sin digest del registry):
+  `docker save` a un tar y `docker-archive:`, montado solo lectura.
+
+Grype corre **como contenedor, con la versión fijada y sin montar `docker.sock`** (ver
+[`scripts/scan.sh`](scripts/scan.sh)): darle el socket al escáner es darle control del
+daemon, así que no se usa su esquema `docker:`. Eso lo cubre
+[`scripts/test-makefile.sh`](scripts/test-makefile.sh). La base de vulnerabilidades
+(cientos de MB) queda en un volumen de Docker (`grype-db`) para no bajarla una vez por
+imagen. Como el job de la CI, `make scan` informa y no falla por hallazgos.
 
 ## Variables compartidas
 

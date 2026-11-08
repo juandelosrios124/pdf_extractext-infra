@@ -22,6 +22,9 @@
 #      env -u (vale el .env de cada repo).
 #  10. "make help" muestra RELEASE, RELEASE_UP_FLAGS, EXTRACT_IMAGE_TAG y
 #      DOCUMENTS_IMAGE_TAG; RELEASE=0 y "make pull" sin RELEASE fallan.
+#  11. "make -n scan" le pasa a scripts/scan.sh los cinco servicios con la
+#      carpeta de su stack y borra los tokens con env -u; "make scan" con una
+#      carpeta que no existe falla; nada monta docker.sock.
 #
 # Uso: scripts/test-makefile.sh
 
@@ -237,6 +240,33 @@ elif grep -qF 'correrlo con RELEASE=1' <<<"$out"; then
   ok "make pull sin RELEASE falla y pide RELEASE=1"
 else
   fail "make pull sin RELEASE falla sin explicar: $out"
+fi
+
+log "11. make scan"
+scan=$("${MAKE_CMD[@]}" -n scan "${FAKE[@]}")
+scan_line=$(grep -F 'scripts/scan.sh' <<<"$scan" | head -n 1)
+expect "$scan_line" "scan: los cinco servicios con su stack" has \
+  "consul \"$REPO_DIR\"" "traefik \"$REPO_DIR\"" \
+  "extract \"$TMP/extract-service\"" \
+  "mongo \"$TMP/documents-service\"" "documents \"$TMP/documents-service\""
+expect "$scan_line" "scan: sin los tokens del entorno" has \
+  'env -u CONSUL_HTTP_TOKEN ' '-u CONSUL_EXTRACT_TOKEN '
+if out=$("${MAKE_CMD[@]}" scan EXTRACT_DIR="$TMP/extract-service" \
+  DOCUMENTS_DIR=/no/existe 2>&1); then
+  fail "make scan con DOCUMENTS_DIR=/no/existe no fallo"
+elif grep -qF 'no existe /no/existe: revisar DOCUMENTS_DIR' <<<"$out"; then
+  ok "make scan con una carpeta que no existe falla y dice cual"
+else
+  fail "make scan con DOCUMENTS_DIR=/no/existe falla sin explicar: $out"
+fi
+# Grype corre como contenedor: nunca se le monta el socket del daemon (darle
+# el socket al escaner es darle control de Docker). El grep saltea los
+# comentarios, que si lo nombran.
+if grep -nE '^[^#]*docker\.sock' "$REPO_DIR/Makefile" "$REPO_DIR/docker-compose.yml" \
+  "$REPO_DIR/.github/workflows/ci.yml" "$REPO_DIR"/scripts/*.sh; then
+  fail "algo monta el socket del daemon"
+else
+  ok "nada monta el socket del daemon"
 fi
 
 if ((FAILED)); then

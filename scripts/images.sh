@@ -16,12 +16,23 @@
 # de containerd tiene RepoDigests, pero son de la maquina. Sale "build local,
 # sin digest".
 #
-# Uso: scripts/images.sh SERVICIO DIR [SERVICIO DIR ...]
+# Con --list no imprime la tabla: una linea por imagen distinta con
+# "SERVICIO<TAB>IMAGEN<TAB>ID<TAB>DIGEST" (DIGEST vacio si la imagen no viene de
+# un registry), para que otro script la consuma. La usa scripts/scan.sh (#15).
+#
+# Uso: scripts/images.sh [--list] SERVICIO DIR [SERVICIO DIR ...]
 
 set -euo pipefail
 
+# --list: salida para otro script (scripts/scan.sh), no la tabla.
+list_only=false
+if [[ ${1-} == --list ]]; then
+  list_only=true
+  shift
+fi
+
 if (($# == 0 || $# % 2 != 0)); then
-  echo "uso: $0 SERVICIO DIR [SERVICIO DIR ...]" >&2
+  echo "uso: $0 [--list] SERVICIO DIR [SERVICIO DIR ...]" >&2
   exit 2
 fi
 
@@ -47,22 +58,32 @@ while (($# > 0)); do
   shift 2
   mapfile -t ids < <(docker compose --project-directory "$dir" ps -q "$service")
   if ((${#ids[@]} == 0)); then
-    printf '%-10s sin contenedores corriendo (%s)\n' "$service" "$dir"
+    if $list_only; then
+      printf 'sin contenedores corriendo: %s (%s)\n' "$service" "$dir" >&2
+    else
+      printf '%-10s sin contenedores corriendo (%s)\n' "$service" "$dir"
+    fi
     continue
   fi
   # "imagen configurada<TAB>ID de imagen", contado por par distinto.
   while read -r count image id; do
     replicas="$count replica$( ((count == 1)) || echo s)"
-    if ! from_registry "$image"; then
-      printf '%-10s %-11s %s  build local, sin digest\n' "$service" "$replicas" "$image"
-      continue
+    digest=""
+    revision=""
+    if from_registry "$image"; then
+      meta=$(docker image inspect "$id" | jq -r --arg repo "$(repo_of "$image")" '.[0] |
+        ([.RepoDigests[]? | select(startswith($repo + "@"))][0] // ""),
+        (.Config.Labels["org.opencontainers.image.revision"] // "sin label")')
+      digest=$(sed -n 1p <<<"$meta")
+      revision=$(sed -n 2p <<<"$meta")
     fi
-    meta=$(docker image inspect "$id" | jq -r --arg repo "$(repo_of "$image")" '.[0] |
-      ([.RepoDigests[]? | select(startswith($repo + "@"))][0] // "sin digest"),
-      (.Config.Labels["org.opencontainers.image.revision"] // "sin label")')
-    digest=$(sed -n 1p <<<"$meta")
-    revision=$(sed -n 2p <<<"$meta")
-    printf '%-10s %-11s %s  digest %s  revision %s\n' \
-      "$service" "$replicas" "$image" "$digest" "$revision"
+    if $list_only; then
+      printf '%s\t%s\t%s\t%s\n' "$service" "$image" "$id" "$digest"
+    elif ! from_registry "$image"; then
+      printf '%-10s %-11s %s  build local, sin digest\n' "$service" "$replicas" "$image"
+    else
+      printf '%-10s %-11s %s  digest %s  revision %s\n' \
+        "$service" "$replicas" "$image" "${digest:-sin digest}" "$revision"
+    fi
   done < <(docker inspect --format '{{.Config.Image}} {{.Image}}' "${ids[@]}" | sort | uniq -c)
 done

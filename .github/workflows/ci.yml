@@ -108,6 +108,39 @@ jobs:
             -v "$PWD/consul/consul.json:/consul/config/consul.json:ro" \
             "$image" consul validate /consul/config
 
+  scan:
+    # Grype sobre las imagenes de terceros que levanta infra (Traefik y Consul).
+    # Informativo: no falla por hallazgos. No se pueden parchear, solo subir de
+    # version, asi que cortar la CI no deja nada que hacer (ver README,
+    # "Escaneo de imagenes"). El paso si falla si Grype no llega a escanear una
+    # imagen: eso es un problema del escaneo, no un hallazgo.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Generar .env de prueba
+        # docker compose config necesita los tokens para resolver el compose.
+        # Un UUID nuevo por token; el .env real nunca se usa.
+        run: |
+          cp .env.example .env
+          for var in CONSUL_HTTP_TOKEN CONSUL_AGENT_TOKEN CONSUL_TRAEFIK_TOKEN \
+                     CONSUL_EXTRACT_TOKEN CONSUL_DOCUMENTS_TOKEN; do
+            grep -q "^$var=" .env || { echo "::error file=.env.example::falta $var"; exit 1; }
+            token=$(uuidgen)
+            sed -i "s/^$var=.*/$var=$token/" .env
+          done
+
+      - name: Grype sobre las imagenes del compose
+        # La lista sale de "docker compose config --images", no de una lista
+        # aparte que se desincronizaria de lo que esta fijado en el compose.
+        # consul y consul-acl-init comparten imagen: scan.sh la escanea una vez.
+        # La version de Grype esta fijada en scripts/scan.sh.
+        run: |
+          mapfile -t images < <(docker compose config --images)
+          printf 'imagenes del compose: %s\n' "${images[*]}"
+          scripts/scan.sh --images "${images[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
   smoke:
     needs: [lint, compose]
     runs-on: ubuntu-24.04

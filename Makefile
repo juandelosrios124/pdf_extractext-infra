@@ -119,10 +119,15 @@ $(warning EXTRACT_IMAGE_TAG y DOCUMENTS_IMAGE_TAG solo cuentan con RELEASE=1; en
 endif
 endif
 MODE = $(if $(RELEASE),release: imagenes de GHCR sin build,desarrollo: build local con docker-compose.override.yml)
+# Pares "SERVICIO CARPETA" de make scan: las cinco imagenes que corren los tres
+# stacks. En una variable (y no partido con "\" en la receta) para que
+# "make -n scan" muestre el comando en una sola linea.
+SCAN_TARGETS = consul "$(INFRA_DIR)" traefik "$(INFRA_DIR)" extract "$(EXTRACT)" mongo "$(DOCUMENTS)" documents "$(DOCUMENTS)"
+
 # $(call require_dir,DIR,VARIABLE)
 require_dir = test -d "$(1)" || { echo "no existe $(1): revisar $(2)" >&2; exit 1; }
 
-.PHONY: help check network up pull wait-routes images down ps logs smoke
+.PHONY: help check network up pull wait-routes images scan down ps logs smoke
 
 help: ## Muestra esta ayuda (target por defecto)
 	@echo "Uso: make <target> [VARIABLE=valor ...]"
@@ -200,6 +205,12 @@ images: ## Imagen, digest y revision de extract y documents corriendo (una linea
 	@$(call require_dir,$(EXTRACT),EXTRACT_DIR)
 	@$(call require_dir,$(DOCUMENTS),DOCUMENTS_DIR)
 	@$(CLEAN_ENV) "$(INFRA_DIR)/scripts/images.sh" extract "$(EXTRACT)" documents "$(DOCUMENTS)"
+
+scan: ## Grype sobre las imagenes que corren los tres stacks (informa, no falla por hallazgos)
+	@echo "==> scan: Grype sobre las imagenes que corren (informativo)"
+	@$(call require_dir,$(EXTRACT),EXTRACT_DIR)
+	@$(call require_dir,$(DOCUMENTS),DOCUMENTS_DIR)
+	@$(CLEAN_ENV) "$(INFRA_DIR)/scripts/scan.sh" $(SCAN_TARGETS)
 
 down: ## Baja documents, extract e infra, en ese orden (sin -v: conserva volumenes y red)
 	@echo "==> documents-service: down"

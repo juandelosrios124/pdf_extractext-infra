@@ -6,7 +6,7 @@
 #   2. Token de extract: registra y desregistra "extract"; "documents" -> 403.
 #   3. Token de documents: registra y desregistra "documents"; "extract" -> 403.
 #   4. Token de Traefik: lee catalogo, health y nodos; registrar -> 403.
-#   5. Sin token, el catalogo no expone servicios: Consul 2.0.4 responde
+#   5. Sin token, el catalogo no expone servicios: Consul 2.1.0 responde
 #      200 con {} (filtra el resultado, no devuelve 403).
 #   6. El token del agente existe con la policy agent, el nodo "ds" tiene sus
 #      direcciones en el catalogo y en el log de Consul no hay errores de ACL

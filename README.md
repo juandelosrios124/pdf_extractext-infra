@@ -203,7 +203,7 @@ docker compose ps -a     # consul y traefik (healthy); consul-acl-init Exited (0
 
 Servidor único con UI y ACL (`default_policy: deny`, ver [ACL](#acl)), basado en el
 [ejemplo de la cátedra](https://github.com/frsrpprats/microservicios/tree/main/consul).
-Imagen fija `hashicorp/consul:2.0.4`.
+Imagen fija `hashicorp/consul:2.1.0`.
 
 - **UI y API desde el host:** <http://127.0.0.1:8500/ui> (publicada solo en 127.0.0.1).
 - **Desde contenedores en `mired`:** `http://consul:8500`.
@@ -348,7 +348,7 @@ Contra el Consul levantado comprueba:
 2. el token de extract registra y desregistra `extract`, y recibe `403` con `documents`;
 3. lo mismo, al revés, con el token de documents;
 4. el token de Traefik lee el catálogo y health con los datos del nodo, y recibe `403` al registrar;
-5. sin token `/v1/catalog/services` devuelve `200 {}` (Consul 2.0.4 filtra, no rechaza);
+5. sin token `/v1/catalog/services` devuelve `200 {}` (Consul 2.1.0 filtra, no rechaza);
 6. el token del agente tiene la policy `agent`, el nodo `ds` tiene sus direcciones en el
    catálogo y, desde que terminó `consul-acl-init`, el log de Consul no tiene errores de
    ACL del agente (por ejemplo `agent: Coordinate update blocked by ACLs`, o
@@ -604,6 +604,33 @@ El job `scan` de la CI toma la lista de `docker compose config --images`, no de 
 aparte que se desincronizaría de los tags y digests fijados en
 [`docker-compose.yml`](docker-compose.yml). `consul` y `consul-acl-init` comparten
 imagen: se escanea una sola vez.
+
+### Versiones fijadas y hallazgos que quedan
+
+Último escaneo: **2026-11-09**, Grype `v0.121.2` (issue #19).
+
+| Imagen | Critical (con fix) | High (con fix) |
+|---|---|---|
+| `hashicorp/consul:2.1.0` | 16 (16) | 42 (37) |
+| `traefik:v3.7.17` | 1 (1) | 0 (0) |
+
+**Por qué no quedan en cero.** Los hallazgos que quedan no están en Consul ni en Traefik:
+son paquetes de la imagen base Alpine (`curl`, `libcurl`, `brotli-libs`, `zlib`). Tienen
+fix publicado en Alpine, pero el fix llega recién cuando *upstream* vuelve a construir y
+publicar la imagen; no hay nada que cambiar acá. Subir de versión ya hizo lo que podía
+hacer:
+
+- **Consul 2.1.0** (desde 2.0.4) corrige los critical que sí eran de Consul: Go stdlib y
+  `golang.org/x/net` (`GO-2026-6604`, `GO-2026-6612`). Critical con fix 19 → 16 y high con
+  fix 51 → 37. 2.1.0 es la más nueva del major 2.
+- **Traefik v3.7.17** es ya la más nueva del major 3 (lo único posterior es
+  `v3.8.0-rc.1`, un release candidate). Su único critical, `CVE-2026-4738` en `zlib`
+  (`1.3.2-r1`, fix en `1.4-r0`), tampoco está corregido en el rc, así que no hay versión a
+  la que subir. Lo que sí se actualizó es el **digest**: el tag `v3.7.17` se volvió a
+  construir y el digest fijado apuntaba a un build anterior (Alpine 3.24.3 → 3.24.4).
+
+Cuando upstream publique imágenes con el Alpine nuevo, alcanza con volver a fijar tag y
+digest: no hace falta cambiar configuración.
 
 ### `make scan`
 

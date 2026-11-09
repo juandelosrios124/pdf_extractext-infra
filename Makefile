@@ -86,6 +86,17 @@ CLEAN_ENV = env $(addprefix -u ,$(COMPOSE_UNSET)) SHARED_NETWORK="$(SHARED_NETWO
 # sin -f) y el de los servicios, que son los mismos con o sin override.
 compose = $(CLEAN_ENV) docker compose --project-directory "$(1)"
 
+# Entorno extra del "up --build" de extract y documents en modo desarrollo.
+# Con el image store de containerd, BuildKit le agrega a cada build una
+# attestation de provenance (con la hora del build), asi que dos builds del
+# mismo contenido dan IDs distintos y el viejo desaparece del daemon. Como
+# Compose no recrea un contenedor si la configuracion no cambio, el segundo
+# "make up" deja los contenedores corriendo un ID que ya no existe y "make scan"
+# falla en "docker save". Sin attestations el ID depende solo del contenido.
+# Solo en desarrollo: el modo release no compila, y las imagenes de GHCR
+# quedan como las construyo la CI.
+DEV_BUILD_ENV := BUILDX_NO_DEFAULT_ATTESTATIONS=1
+
 # $(call cli_tag,VARIABLE): el valor de VARIABLE si se paso en la linea de
 # comandos y no esta vacio; si no, nada.
 cli_tag = $(if $(findstring command line,$(origin $(1))),$(strip $($(1))))
@@ -94,8 +105,10 @@ release_env = $(if $(call cli_tag,$(1)), $(1)="$(call cli_tag,$(1))")
 # $(call svc_compose,DIR,VARIABLE_TAG): docker compose de extract o documents
 # segun el modo. Con RELEASE=1, solo docker-compose.yml (ruta absoluta: un -f
 # relativo se resuelve contra el cwd, no contra --project-directory) y el tag.
+# En desarrollo, el de compose con DEV_BUILD_ENV.
 svc_compose = $(if $(RELEASE),$(CLEAN_ENV)$(call release_env,$(2)) docker compose \
-	--project-directory "$(1)" -f "$(1)/docker-compose.yml",$(call compose,$(1)))
+	--project-directory "$(1)" -f "$(1)/docker-compose.yml",$(CLEAN_ENV) $(DEV_BUILD_ENV) docker compose \
+	--project-directory "$(1)")
 # $(call svc_up_flags,SERVICIO): flags de "up" de EXTRACT o DOCUMENTS.
 svc_up_flags = $(if $(RELEASE),$(RELEASE_UP_FLAGS),$($(1)_UP_FLAGS))
 # $(call show_image,DIR,VARIABLE_TAG,SERVICIO): con RELEASE=1, la imagen que

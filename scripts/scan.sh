@@ -131,27 +131,40 @@ host_path() {
 # de Windows ("/cache" -> "C:/Program Files/Git/cache"), y estas son rutas de
 # dentro del contenedor; en Linux y mac las dos variables no hacen nada.
 run_grype() {
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm \
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm -q \
     -e GRYPE_DB_CACHE_DIR=/cache -v "$GRYPE_DB_VOLUME:/cache" "$@"
 }
 
-# scan_target ORIGEN REF REPORTE: deja el JSON de Grype en REPORTE.
+# scan_target ORIGEN REF REPORTE ARCHIVO: deja el JSON de Grype en REPORTE.
+# ARCHIVO es el tar de este objetivo (uno por objetivo, asi un fallo no
+# contamina al siguiente). Se llama dentro de un "if !", donde bash ignora
+# "set -e": cada paso que puede fallar corta con "|| return" a mano.
 scan_target() {
-  local src=$1 ref=$2 report=$3 tar="$TMP/image.tar"
+  local src=$1 ref=$2 report=$3 tar=$4 gerr="$4.grype.err" rc=0
   case $src in
     registry)
-      run_grype "$GRYPE_IMAGE" -q -o json "registry:$ref" >"$report"
+      run_grype "$GRYPE_IMAGE" -q -o json "registry:$ref" >"$report" 2>"$gerr" || rc=$?
       ;;
     docker-archive)
       # El tar sale de la imagen por ID (la que corre el contenedor) y se monta
-      # solo lectura: Grype no necesita nada mas del daemon.
-      rm -f "$tar"
-      docker save --output "$tar" "$ref"
+      # solo lectura: Grype no necesita nada mas del daemon. Si docker save
+      # falla no se lanza Grype: "docker run -v" sobre un archivo que no existe
+      # crea un directorio en su lugar.
+      if ! docker save --output "$tar" "$ref"; then
+        rm -rf "$tar"
+        echo "docker save no pudo exportar $ref: la imagen que corre el contenedor ya no esta en el daemon (se reconstruyo o se borro el tag?). Recrear el contenedor y volver a correr el escaneo." >&2
+        return 1
+      fi
       run_grype -v "$(host_path "$tar"):/image.tar:ro" \
-        "$GRYPE_IMAGE" -q -o json docker-archive:/image.tar >"$report"
-      rm -f "$tar"
+        "$GRYPE_IMAGE" -q -o json docker-archive:/image.tar >"$report" 2>"$gerr" || rc=$?
+      rm -rf "$tar"
       ;;
   esac
+  if ((rc != 0)); then
+    echo "Grype termino con codigo $rc. Salida de error:" >&2
+    tail -n 20 "$gerr" >&2
+    return 1
+  fi
 }
 
 # severity_table REPORTE: hallazgos por severidad, y cuantos tienen fix (los
@@ -202,7 +215,7 @@ for i in "${!t_ref[@]}"; do
     echo "Sin digest para bajarla del registry: \`docker save\` de \`${t_ref[i]}\` y \`docker-archive:\`"
   fi
   echo
-  if ! scan_target "${t_src[i]}" "${t_ref[i]}" "$report" 2>"$TMP/error.txt"; then
+  if ! scan_target "${t_src[i]}" "${t_ref[i]}" "$report" "$TMP/image-$i.tar" 2>"$TMP/error.txt"; then
     echo "**Grype no pudo escanear esta imagen:**"
     echo
     echo '```'

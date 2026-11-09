@@ -12,10 +12,12 @@
 #   5. "make check DOCUMENTS_DIR=/no/existe" falla y lo dice.
 #   6. "make check" con CONSUL_HTTP_TOKEN= vacio en el .env de extract falla y
 #      dice que falta y donde.
-#   7. "make -n up" (desarrollo): extract y documents con --build y sin -f.
+#   7. "make -n up" (desarrollo): extract y documents con --build, sin -f y
+#      con BUILDX_NO_DEFAULT_ATTESTATIONS=1 (ID de imagen estable entre builds);
+#      infra sin esa variable.
 #   8. "make -n up RELEASE=1": extract y documents con
-#      -f <ruta absoluta>/docker-compose.yml, --pull=missing y sin --build;
-#      infra igual que en desarrollo.
+#      -f <ruta absoluta>/docker-compose.yml, --pull=missing, sin --build y sin
+#      BUILDX_NO_DEFAULT_ATTESTATIONS; infra igual que en desarrollo.
 #   9. Tags: EXTRACT_IMAGE_TAG=sha-abc1234 en la linea de comandos llega solo a
 #      extract. Exportado en el entorno (sin pasarlo a make) o vacio en la
 #      linea de comandos no llega a ningun compose, y todos lo borran con
@@ -165,20 +167,22 @@ expect() {
 log "7. make -n up (desarrollo)"
 for repo in extract-service documents-service; do
   line=$(compose_line "$up" "$TMP/$repo")
-  expect "$line" "$repo" has "up -d --build --wait"
+  expect "$line" "$repo" has "up -d --build --wait" \
+    'BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose'
   expect "$line" "$repo" lacks " -f " "--pull"
 done
+expect "$(compose_line "$up" "$REPO_DIR")" "infra" lacks BUILDX_NO_DEFAULT_ATTESTATIONS
 
 log "8. make -n up RELEASE=1"
 release=$("${MAKE_CMD[@]}" -n up RELEASE=1 "${FAKE[@]}")
 for repo in extract-service documents-service; do
   line=$(compose_line "$release" "$TMP/$repo")
   expect "$line" "$repo" has "-f \"$TMP/$repo/docker-compose.yml\" up -d --pull=missing --wait"
-  expect "$line" "$repo" lacks "--build"
+  expect "$line" "$repo" lacks "--build" BUILDX_NO_DEFAULT_ATTESTATIONS
 done
 line=$(compose_line "$release" "$REPO_DIR")
 expect "$line" "infra" has "up -d --wait"
-expect "$line" "infra" lacks " -f " "--pull" "--build"
+expect "$line" "infra" lacks " -f " "--pull" "--build" BUILDX_NO_DEFAULT_ATTESTATIONS
 if grep -qF scripts/images.sh <<<"$release"; then
   ok "up RELEASE=1 termina con make images"
 else

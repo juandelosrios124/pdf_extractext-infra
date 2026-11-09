@@ -97,7 +97,7 @@ for svc in $SERVICES; do
     | jq -r '.AccessorID // empty') || accessor=""
   if [ -n "$accessor" ]; then
     # -policy-name reemplaza las policies del token (no las agrega). En la
-    # CLI 2.0.4 el flag es -accessor-id (-id quedo como alias con aviso).
+    # CLI 2.1.0 el flag es -accessor-id (-id quedo como alias con aviso).
     consul acl token update -accessor-id "$accessor" -description "$desc" -policy-name "$svc" >/dev/null
     log "token $svc: actualizado (accessor $accessor)"
   else

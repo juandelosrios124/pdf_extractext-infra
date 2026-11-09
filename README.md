@@ -630,6 +630,26 @@ daemon, así que no se usa su esquema `docker:`. Eso lo cubre
 (cientos de MB) queda en un volumen de Docker (`grype-db`) para no bajarla una vez por
 imagen. Como el job de la CI, `make scan` informa y no falla por hallazgos.
 
+**Builds locales y el ID de la imagen.** Con el image store de containerd, BuildKit le
+agrega a cada build una *attestation* de provenance con la hora del build: dos
+`docker compose build` seguidos del mismo código dan el mismo `Created` pero **otro
+`Id`**, y el `Id` viejo desaparece del daemon. `make up --build` no recrea los
+contenedores si la configuración no cambió, así que después del segundo `make up`
+seguían corriendo un `Id` que ya no existía, y `make scan` fallaba en `docker save` con
+`No such image` ("Grype no pudo escanear esta imagen"). Por eso el `up` de extract y
+documents en modo desarrollo corre con `BUILDX_NO_DEFAULT_ATTESTATIONS=1` (`DEV_BUILD_ENV`
+en el [`Makefile`](Makefile)): sin attestations el `Id` depende solo del contenido y no
+cambia entre builds iguales. El modo release no compila y no la usa.
+
+Si el sistema se levantó antes de este cambio (o con un `docker compose up --build` a
+mano, sin la variable), los contenedores pueden estar corriendo un `Id` borrado y
+`make scan` lo informa así. Se arregla recreándolos una vez:
+
+```bash
+make up EXTRACT_UP_FLAGS="-d --build --wait --force-recreate" \
+  DOCUMENTS_UP_FLAGS="-d --build --wait --force-recreate"
+```
+
 ## Variables compartidas
 
 Los tres repos usan **estos mismos nombres**. Si se cambia alguno, cambiarlo en todos.

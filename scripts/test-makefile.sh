@@ -259,6 +259,49 @@ elif grep -qF 'no existe /no/existe: revisar DOCUMENTS_DIR' <<<"$out"; then
 else
   fail "make scan con DOCUMENTS_DIR=/no/existe falla sin explicar: $out"
 fi
+# scan.sh con un "docker" falso: docker save falla (la imagen que corre el
+# contenedor ya no esta en el daemon). Tiene que cortar ese objetivo sin
+# lanzar Grype, seguir con el siguiente y salir con 1; el segundo objetivo
+# (Grype falla con codigo 3) tiene que mostrar el codigo y el stderr de Grype.
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$FAKEBIN"
+cat >"$FAKEBIN/docker" <<'FAKEDOCKER'
+#!/usr/bin/env bash
+case $1 in
+  compose) echo "cid-$(basename "${3-x}")" ;;
+  inspect)
+    case $* in
+      *cid-one*) echo "svc-one:dev sha256:aaa" ;;
+      *) echo "svc-two:dev sha256:bbb" ;;
+    esac ;;
+  save)
+    if [[ $* == *sha256:aaa* ]]; then
+      echo "Error response from daemon: No such image: sha256:aaa" >&2
+      exit 1
+    fi
+    : >"$3" ;;
+  run)
+    echo "run $*" >>"$FAKE_DOCKER_LOG"
+    echo "grype: causa-falsa-de-grype" >&2
+    exit 3 ;;
+esac
+FAKEDOCKER
+chmod +x "$FAKEBIN/docker"
+export FAKE_DOCKER_LOG="$TMP/docker.log"
+: >"$FAKE_DOCKER_LOG"
+mkdir -p "$TMP/one" "$TMP/two"
+if out=$(PATH="$FAKEBIN:$PATH" "$REPO_DIR/scripts/scan.sh" one "$TMP/one" two "$TMP/two" 2>&1); then
+  fail "scan.sh con docker save roto no fallo"
+else
+  expect "$out" "scan: docker save fallido se informa y sigue con el siguiente" has \
+    'No such image: sha256:aaa' 'docker save no pudo exportar sha256:aaa' \
+    'Grype termino con codigo 3' 'causa-falsa-de-grype'
+  if [[ $(grep -c '^run ' "$FAKE_DOCKER_LOG") == 1 ]]; then
+    ok "scan: Grype no se lanza para la imagen cuyo docker save fallo"
+  else
+    fail "scan: Grype se lanzo $(grep -c '^run ' "$FAKE_DOCKER_LOG") veces, esperaba 1: $(cat "$FAKE_DOCKER_LOG")"
+  fi
+fi
 # Grype corre como contenedor: nunca se le monta el socket del daemon (darle
 # el socket al escaner es darle control de Docker). El grep saltea los
 # comentarios, que si lo nombran.
